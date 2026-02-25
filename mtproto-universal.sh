@@ -104,14 +104,24 @@ check_installation() {
     fi
 }
 
+get_installation_status() {
+    if check_installation; then
+        echo 0
+    elif [ -f "$SERVICE_FILE" ]; then
+        echo 1
+    else
+        echo 2
+    fi
+}
+
 [[ $EUID -ne 0 ]] && err "Запускай от root! (sudo bash script.sh)"
 
 # ============ ГЛАВНОЕ МЕНЮ ============
 show_start_menu() {
     clear_screen
     
-    check_installation
-    local status=$?
+    local status
+    status=$(get_installation_status)
     
     echo ""
     
@@ -487,8 +497,8 @@ run_manager() {
 show_manager_menu() {
     clear_screen
     
-    check_installation
-    local status=$?
+    local status
+    status=$(get_installation_status)
     
     if [ $status -eq 0 ]; then
         echo -e " ${GREEN}✅ СТАТУС: РАБОТАЕТ${NC}"
@@ -838,8 +848,7 @@ install_command
 while true; do
     clear_screen
     
-    check_installation
-    local status=$?
+    status=$(get_installation_status)
     
     echo ""
     
