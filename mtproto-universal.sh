@@ -7,12 +7,12 @@
 set -e
 
 # ============ ЦВЕТА И СТИЛИ ============
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+BOLD=$'\033[1m'
+NC=$'\033[0m'
 
 # ============ ПЕРЕМЕННЫЕ ============
 INSTALL_DIR="/opt/MTProxy"
@@ -104,14 +104,24 @@ check_installation() {
     fi
 }
 
+get_installation_status() {
+    if check_installation; then
+        echo 0
+    elif [ -f "$SERVICE_FILE" ]; then
+        echo 1
+    else
+        echo 2
+    fi
+}
+
 [[ $EUID -ne 0 ]] && err "Запускай от root! (sudo bash script.sh)"
 
 # ============ ГЛАВНОЕ МЕНЮ ============
 show_start_menu() {
     clear_screen
     
-    check_installation
-    local status=$?
+    local status
+    status=$(get_installation_status)
     
     echo ""
     
@@ -487,8 +497,8 @@ run_manager() {
 show_manager_menu() {
     clear_screen
     
-    check_installation
-    local status=$?
+    local status
+    status=$(get_installation_status)
     
     if [ $status -eq 0 ]; then
         echo -e " ${GREEN}✅ СТАТУС: РАБОТАЕТ${NC}"
@@ -589,17 +599,17 @@ manager_show_status() {
     SECRET=$(grep -oP '(?<=-S )\S+' "$SERVICE_FILE" || echo "N/A")
     SERVER_IP=$(hostname -I | awk '{print $1}')
     
-    echo " Пользователь:  ${CYAN}$RUN_USER${NC}"
-    echo " Сервер IP:     ${CYAN}$SERVER_IP${NC}"
-    echo " Внешний порт:  ${CYAN}$PROXY_PORT${NC}"
-    echo " Внутренний порт: ${CYAN}$INTERNAL_PORT${NC}"
-    echo " Секрет:        ${CYAN}${SECRET:0:16}...${NC}"
+    printf " Пользователь:  %b%s%b\n" "$CYAN" "$RUN_USER" "$NC"
+    printf " Сервер IP:     %b%s%b\n" "$CYAN" "$SERVER_IP" "$NC"
+    printf " Внешний порт:  %b%s%b\n" "$CYAN" "$PROXY_PORT" "$NC"
+    printf " Внутренний порт: %b%s%b\n" "$CYAN" "$INTERNAL_PORT" "$NC"
+    printf " Секрет:        %b%s...%b\n" "$CYAN" "${SECRET:0:16}" "$NC"
     
     if grep -q -- "-P " "$SERVICE_FILE"; then
         SPONSOR_TAG=$(grep -oP '(?<=-P )\S+' "$SERVICE_FILE" || echo "N/A")
-        echo " Тег спонсора:  ${CYAN}$SPONSOR_TAG${NC}"
+        printf " Тег спонсора:  %b%s%b\n" "$CYAN" "$SPONSOR_TAG" "$NC"
     else
-        echo " Тег спонсора:  ${YELLOW}не установлен${NC}"
+        printf " Тег спонсора:  %bне установлен%b\n" "$YELLOW" "$NC"
     fi
     
     echo ""
@@ -723,6 +733,25 @@ manager_remove_tag() {
     read -rp " Нажми Enter для возврата... "
 }
 
+ensure_bind_permissions() {
+    local target_port=$1
+    local service_user
+
+    service_user=$(grep "^User=" "$SERVICE_FILE" | cut -d'=' -f2)
+
+    if [ "$service_user" = "mtproxy" ] && [ "$target_port" -lt 1024 ]; then
+        if ! command -v setcap &>/dev/null; then
+            apt install -y libcap2-bin >> "$LOGFILE" 2>&1
+        fi
+
+        if command -v setcap &>/dev/null; then
+            setcap "cap_net_bind_service=+ep" "$INSTALL_DIR/mtproto-proxy"
+        else
+            warning "Не удалось установить setcap (libcap2-bin). Порт <1024 может не заработать для mtproxy"
+        fi
+    fi
+}
+
 manager_change_port() {
     clear_screen
     echo ""
@@ -765,15 +794,25 @@ manager_change_port() {
     esac
     
     if netstat -tuln 2>/dev/null | grep -q ":$NEW_PORT " || ss -tuln 2>/dev/null | grep -q ":$NEW_PORT "; then
-        err "Порт $NEW_PORT уже занят!"
+        warning "Порт $NEW_PORT уже занят!"
+        read -rp " Нажми Enter для возврата... "
+        return
     fi
-    
+
     sed -i "s|-H [0-9]*|-H $NEW_PORT|" "$SERVICE_FILE"
+
+    ensure_bind_permissions "$NEW_PORT"
+
     systemctl daemon-reload > /dev/null 2>&1
     systemctl restart mtproto-proxy > /dev/null 2>&1
     sleep 2
-    
-    success "Порт изменен на $NEW_PORT!"
+
+    if systemctl is-active --quiet mtproto-proxy; then
+        success "Порт изменен на $NEW_PORT!"
+    else
+        warning "Порт изменен, но сервис не запустился. Проверь: journalctl -u mtproto-proxy -n 50 --no-pager"
+    fi
+
     read -rp " Нажми Enter для возврата... "
 }
 
@@ -825,8 +864,11 @@ uninstall_mtproxy_silent() {
 
 # ============ УСТАНОВКА КОМАНДЫ ============
 install_command() {
-    if [ ! -L "$MANAGER_LINK" ] || [ "$(readlink $MANAGER_LINK)" != "$0" ]; then
-        ln -sf "$0" "$MANAGER_LINK" 2>/dev/null || true
+    local script_path
+    script_path=$(realpath "$0" 2>/dev/null || echo "$0")
+
+    if [ ! -L "$MANAGER_LINK" ] || [ "$(readlink -f "$MANAGER_LINK" 2>/dev/null || true)" != "$script_path" ]; then
+        ln -sf "$script_path" "$MANAGER_LINK" 2>/dev/null || true
         chmod +x "$MANAGER_LINK" 2>/dev/null || true
     fi
 }
@@ -838,8 +880,7 @@ install_command
 while true; do
     clear_screen
     
-    check_installation
-    local status=$?
+    status=$(get_installation_status)
     
     echo ""
     
