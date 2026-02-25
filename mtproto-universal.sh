@@ -44,7 +44,7 @@ clear_screen() {
     echo -e "${CYAN}${BOLD}"
     echo " ╔════════════════════════════════════════════╗"
     echo " ║  MTProto Proxy Manager v3.0                ║"
-    echo " ║  github.com/tarpy-socdev/MTProto-VPS      ║"
+    echo " ║  github.com/tarpy-socdev/MTProto-VPS       ║"
     echo " ╚════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
