@@ -3,7 +3,6 @@
 # MTProto Proxy — Universal Manager v3.0
 # Установка + Менеджер в одном скрипте
 # github.com/tarpy-socdev/MTProto-VPS
-# download: https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/main/beta/v3.5_go.sh
 # ==============================================
 set -e
 
