@@ -836,49 +836,46 @@ fi
 
 install_command
 
-while true; do
-    clear_screen
-    status=$(get_installation_status)
+# Главное меню (без цикла — run_manager имеет свой)
+clear_screen
+status=$(get_installation_status)
+echo ""
+if [ $status -eq 0 ]; then
+    echo -e " ${GREEN}✅ MTPROTO УСТАНОВЛЕН И РАБОТАЕТ${NC}"
     echo ""
-
-    if [ $status -eq 0 ]; then
-        echo -e " ${GREEN}✅ MTPROTO УСТАНОВЛЕН И РАБОТАЕТ${NC}"
-        echo ""
-        echo " 1) 📊 Менеджер"
-        echo " 2) ⚙️  Переустановить"
-        echo " 3) 🚪 Выход"
-        echo ""
-        read -rp "Выбор [1-3]: " choice
-        case $choice in
-            1) run_manager ;;
-            2)
-                read -rp "⚠️  Переустановить? (yes/no): " confirm
-                [ "$confirm" = "yes" ] && { uninstall_mtproxy_silent; run_installer; }
-                ;;
-            3) echo -e "${GREEN}До свидания! 👋${NC}"; exit 0 ;;
-            *) warning "Неправильный выбор"; sleep 2 ;;
-        esac
-
-    elif [ $status -eq 1 ]; then
-        echo -e " ${RED}❌ MTPROTO УСТАНОВЛЕН НО НЕ РАБОТАЕТ${NC}"
-        echo ""
-        read -rp "Восстановить? (y/n): " restore
-        if [[ "$restore" =~ ^[Yy]$ ]]; then
-            systemctl restart mtproto-proxy
-            sleep 2
-            systemctl is-active --quiet mtproto-proxy && success "Восстановлен!" || warning "Не удалось восстановить"
-        fi
+    echo " 1) 📊 Менеджер"
+    echo " 2) ⚙️  Переустановить"
+    echo " 3) 🚪 Выход"
+    echo ""
+    read -rp "Выбор [1-3]: " choice
+    case $choice in
+        1) run_manager ;;  # Запускает свой while true внутри
+        2)
+            read -rp "⚠️  Переустановить? (yes/no): " confirm
+            [ "$confirm" = "yes" ] && { uninstall_mtproxy_silent; run_installer; }
+            ;;
+        3) echo -e "${GREEN}До свидания! 👋${NC}"; exit 0 ;;
+        *) warning "Неправильный выбор"; sleep 2; exec "$0" ;;
+    esac
+elif [ $status -eq 1 ]; then
+    echo -e " ${RED}❌ MTPROTO УСТАНОВЛЕН НО НЕ РАБОТАЕТ${NC}"
+    echo ""
+    read -rp "Восстановить? (y/n): " restore
+    if [[ "$restore" =~ ^[Yy]$ ]]; then
+        systemctl restart mtproto-proxy
         sleep 2
-
-    else
-        echo -e " ${YELLOW}⚠️  MTPROTO НЕ УСТАНОВЛЕН${NC}"
-        echo ""
-        read -rp "Установить? (y/n): " install_choice
-        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
-            run_installer
-        else
-            echo -e "${GREEN}До свидания! 👋${NC}"
-            exit 0
-        fi
+        systemctl is-active --quiet mtproto-proxy && success "Восстановлен!" || warning "Не удалось восстановить"
     fi
-done
+    sleep 2
+    exec "$0"  # Перезапуск скрипта
+else
+    echo -e " ${YELLOW}⚠️  MTPROTO НЕ УСТАНОВЛЕН${NC}"
+    echo ""
+    read -rp "Установить? (y/n): " install_choice
+    if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+        run_installer
+    else
+        echo -e "${GREEN}До свидания! 👋${NC}"
+        exit 0
+    fi
+fi
