@@ -25,14 +25,14 @@
 
 ### Способ 1: Через curl
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/main/mtproto-universal-v4.sh -o mtproto-universal-v4.sh
+curl -fsSL https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/main/mtproto-universal-v4.sh -o mtproto-universal-v4.sh
 chmod +x mtproto-universal-v4.sh
 sudo ./mtproto-universal-v4.sh
 ```
 
 ### Способ 2: Через wget
 ```bash
-wget -O mtproto-universal-v4.sh https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/main/mtproto-universal-v4.sh
+wget -O mtproto-universal-v4.sh https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/main/mtproto-universal-v4.sh
 chmod +x mtproto-universal-v4.sh
 sudo ./mtproto-universal-v4.sh
 ```
