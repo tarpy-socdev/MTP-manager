@@ -99,9 +99,8 @@ check_port_available() {
 
 # ============ РЕСУРСЫ (ПРАВИЛЬНЫЕ ФОРМУЛЫ) ============
 get_cpu_usage() {
-    # Используем top в batch mode, берём idle и вычитаем из 100
-    local idle=$(top -bn2 -d 0.5 | grep "Cpu(s)" | tail -1 | awk '{print $8}' | cut -d'%' -f1)
-    awk -v idle="$idle" 'BEGIN {printf "%.1f", 100 - idle}'
+    # Используем top в batch mode
+    top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1}'
 }
 
 get_ram_usage() {
@@ -112,8 +111,7 @@ get_ram_usage() {
 get_proxy_connections() {
     local port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
     # Считаем только ESTABLISHED соединения на порту прокси (входящие — dport)
-    local count=$(ss -tn state established "( dport = :$port )" 2>/dev/null | grep -c "^ESTAB" 2>/dev/null)
-    echo "${count:-0}"
+    ss -tn state established "( dport = :$port )" 2>/dev/null | grep -c "^ESTAB" || echo "0"
 }
 
 get_uptime() {
@@ -179,8 +177,8 @@ show_resource_live() {
         echo ""
         echo " [q] — выход в меню"
         
-        # Проверка нажатия q с timeout 2 секунды (меньше мигания)
-        read -t 2 -n 1 key 2>/dev/null
+        # Проверка нажатия q с timeout
+        read -t 1 -n 1 key 2>/dev/null
         if [ "$key" = "q" ] || [ "$key" = "Q" ]; then
             break
         fi
@@ -193,23 +191,29 @@ show_resource_live() {
 manager_show_qr() {
     clear_screen
     local port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
-    local secret=$(grep -oP '(?<=-S )[0-9a-fA-F]+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null)
-    [ -z "$secret" ] && secret=$(cat $SECRET_FILE 2>/dev/null)
-    [ -z "$secret" ] && secret="unknown"
-    
+    local secret=$(cat $SECRET_FILE 2>/dev/null || echo "unknown")
     local server_ip=$(get_server_ip)
     local tag=""
     [ -f "$TAG_FILE" ] && tag=$(cat "$TAG_FILE")
     
     local tg_link="tg://proxy?server=${server_ip}&port=${port}&secret=${secret}"
-    [ -n "$tag" ] && tg_link="${tg_link}&tag=${tag}"
+    [ -n "$tag" ] && tg_link+="&tag=${tag}"
     
     echo ""
     echo -e " ${BOLD}📱 QR КОД ДЛЯ ПОДКЛЮЧЕНИЯ${NC}"
     echo " ─────────────────────────────────────────────"
     echo ""
-    echo " (QR генерация требует imagemagick)"
-    echo " Для установки: apt install imagemagick"
+    
+    # QR через API если есть curl
+    if command -v curl >/dev/null 2>&1; then
+        curl -s "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${tg_link}" 2>/dev/null | \
+        convert - -resize 40x40 txt:- 2>/dev/null | grep -v '^#' | \
+        awk '{if($3 ~ /gray\(0/) printf "██"; else printf "  "; if(NR%40==0) print ""}' || \
+        echo " (QR код недоступен — установи imagemagick)"
+    else
+        echo " (Установи curl и imagemagick для QR)"
+    fi
+    
     echo ""
     echo " Ссылка:"
     echo " $tg_link"
@@ -344,13 +348,12 @@ manager_change_port() {
         
         # Выводим новую ссылку
         local server_ip=$(get_server_ip)
-        local secret=$(grep -oP '(?<=-S )[0-9a-fA-F]+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null)
-        [ -z "$secret" ] && secret=$(cat $SECRET_FILE 2>/dev/null)
+        local secret=$(cat $SECRET_FILE 2>/dev/null)
         local tag=""
         [ -f "$TAG_FILE" ] && tag=$(cat "$TAG_FILE")
         
         local tg_link="tg://proxy?server=${server_ip}&port=${new_port}&secret=${secret}"
-        [ -n "$tag" ] && tg_link="${tg_link}&tag=${tag}"
+        [ -n "$tag" ] && tg_link+="&tag=${tag}"
         
         echo -e " ${GREEN}Новая ссылка для подключения:${NC}"
         echo " $tg_link"
