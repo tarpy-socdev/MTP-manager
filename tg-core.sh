@@ -1,14 +1,10 @@
 #!/bin/bash
 # ==============================================================================
-# TG-CORE v1.2 — Telegram Notification Engine (Independent)
+# TG-CORE v1.1 — Telegram Notification Engine (Independent)
 # ==============================================================================
 # Универсальное ядро для интеграции Telegram уведомлений в любой проект.
 # Проект подключает это ядро через source и задаёт свои колбеки.
 # ==============================================================================
-
-# Устанавливаем UTF-8 для правильного отображения русских символов
-export LANG=ru_RU.UTF-8
-export LC_ALL=ru_RU.UTF-8
 
 # ============ ЦВЕТА (переопределяются проектом если нужно) ============
 _R="${_R:-$'\033[0;31m'}"
@@ -343,20 +339,6 @@ _tg_setup_add_chat() {
     # Автоотправка первого сообщения
     _tg_reset_msgid "$chat_id"
     tg_send_or_update "$chat_id" "$mode"
-    
-    # Автозапуск демона если это первый чат
-    if [ ${#TG_CHAT_IDS[@]} -eq 1 ]; then
-        echo ""
-        echo " Это первый чат — запускаю демон обновлений..."
-        [ ! -f "/etc/systemd/system/${TG_SERVICE_NAME}.service" ] && tg_install_service
-        tg_service_start
-        sleep 1
-        if [ "$(tg_service_status)" = "running" ]; then
-            echo -e " ${_G}✅ Демон запущен${_N}"
-        else
-            echo -e " ${_R}❌ Не удалось запустить демон${_N}"
-        fi
-    fi
     
     echo -e " ${_G}✅ Чат добавлен${_N}"
     sleep 2
