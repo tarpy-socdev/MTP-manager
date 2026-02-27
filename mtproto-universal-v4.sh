@@ -111,7 +111,8 @@ get_ram_usage() {
 get_proxy_connections() {
     local port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
     # Считаем только ESTABLISHED соединения на порту прокси (входящие — dport)
-    ss -tn state established "( dport = :$port )" 2>/dev/null | grep -c "^ESTAB" || echo "0"
+    local count=$(ss -tn state established "( dport = :$port )" 2>/dev/null | grep -c "^ESTAB" 2>/dev/null)
+    echo "${count:-0}"
 }
 
 get_uptime() {
@@ -177,8 +178,8 @@ show_resource_live() {
         echo ""
         echo " [q] — выход в меню"
         
-        # Проверка нажатия q с timeout
-        read -t 1 -n 1 key 2>/dev/null
+        # Проверка нажатия q с timeout (2 сек для уменьшения мигания)
+        read -t 2 -n 1 key 2>/dev/null
         if [ "$key" = "q" ] || [ "$key" = "Q" ]; then
             break
         fi
@@ -191,7 +192,10 @@ show_resource_live() {
 manager_show_qr() {
     clear_screen
     local port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
-    local secret=$(cat $SECRET_FILE 2>/dev/null || echo "unknown")
+    # Читаем секрет из service файла
+    local secret=$(grep -oP '(?<=-S )[0-9a-fA-F]+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null)
+    [ -z "$secret" ] && secret="unknown"
+    
     local server_ip=$(get_server_ip)
     local tag=""
     [ -f "$TAG_FILE" ] && tag=$(cat "$TAG_FILE")
@@ -204,14 +208,13 @@ manager_show_qr() {
     echo " ─────────────────────────────────────────────"
     echo ""
     
-    # QR через API если есть curl
+    # Простой ASCII QR через API (без imagemagick)
     if command -v curl >/dev/null 2>&1; then
-        curl -s "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${tg_link}" 2>/dev/null | \
-        convert - -resize 40x40 txt:- 2>/dev/null | grep -v '^#' | \
-        awk '{if($3 ~ /gray\(0/) printf "██"; else printf "  "; if(NR%40==0) print ""}' || \
-        echo " (QR код недоступен — установи imagemagick)"
+        echo " Генерируем QR код..."
+        local qr_url="https://api.qrserver.com/v1/create-qr-code/?size=300x300&format=png&data=$(echo -n "$tg_link" | jq -sRr @uri 2>/dev/null || python3 -c "import urllib.parse; print(urllib.parse.quote(input()))" <<< "$tg_link" 2>/dev/null || echo "$tg_link")"
+        echo " Открой в браузере: $qr_url"
     else
-        echo " (Установи curl и imagemagick для QR)"
+        echo " (Для QR кода установи curl)"
     fi
     
     echo ""
@@ -348,7 +351,9 @@ manager_change_port() {
         
         # Выводим новую ссылку
         local server_ip=$(get_server_ip)
-        local secret=$(cat $SECRET_FILE 2>/dev/null)
+        # Читаем секрет из service файла
+        local secret=$(grep -oP '(?<=-S )[0-9a-fA-F]+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null)
+        [ -z "$secret" ] && secret="unknown"
         local tag=""
         [ -f "$TAG_FILE" ] && tag=$(cat "$TAG_FILE")
         
