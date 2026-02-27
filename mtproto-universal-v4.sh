@@ -99,8 +99,8 @@ check_port_available() {
 
 # ============ РЕСУРСЫ (ПРАВИЛЬНЫЕ ФОРМУЛЫ) ============
 get_cpu_usage() {
-    # Используем top в batch mode
-    top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1}'
+    # Используем vmstat для точного CPU (среднее за 1 секунду)
+    vmstat 1 2 | tail -1 | awk '{print 100 - $15}'
 }
 
 get_ram_usage() {
@@ -109,7 +109,7 @@ get_ram_usage() {
 }
 
 get_proxy_connections() {
-    local port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
+    local port=$(grep -oP '(?<=-H )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
     # Считаем только ESTABLISHED соединения на порту прокси (входящие — dport)
     local count=$(ss -tn state established "( dport = :$port )" 2>/dev/null | grep -c "^ESTAB" 2>/dev/null)
     echo "${count:-0}"
@@ -124,7 +124,7 @@ get_uptime() {
 
 # ============ ЖИВОЙ МОНИТОР РЕСУРСОВ ============
 show_resource_live() {
-    local port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
+    local port=$(grep -oP '(?<=-H )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
     local server_ip=$(get_server_ip)
     
     # Альтернативный экран
@@ -159,17 +159,17 @@ show_resource_live() {
         local cpu_int=${cpu%.*}
         local cpu_bars=$((cpu_int / 5))
         printf " CPU: "
-        printf '█%.0s' $(seq 1 $cpu_bars)
-        printf '░%.0s' $(seq 1 $((20 - cpu_bars)))
-        printf " %.1f%%\n" "$cpu"
+        LC_NUMERIC=C printf '█%.0s' $(seq 1 $cpu_bars)
+        LC_NUMERIC=C printf '░%.0s' $(seq 1 $((20 - cpu_bars)))
+        LC_NUMERIC=C printf " %.1f%%\n" "$cpu"
         
         # RAM progress bar
         local ram_int=${ram_pct%.*}
         local ram_bars=$((ram_int / 5))
         printf " RAM: "
-        printf '█%.0s' $(seq 1 $ram_bars)
-        printf '░%.0s' $(seq 1 $((20 - ram_bars)))
-        printf " %.1f%% (%d MB)\n" "$ram_pct" "$ram_mb"
+        LC_NUMERIC=C printf '█%.0s' $(seq 1 $ram_bars)
+        LC_NUMERIC=C printf '░%.0s' $(seq 1 $((20 - ram_bars)))
+        LC_NUMERIC=C printf " %.1f%% (%d MB)\n" "$ram_pct" "$ram_mb"
         
         echo ""
         echo " 📝 Последние логи:"
@@ -191,7 +191,7 @@ show_resource_live() {
 # ============ QR КОД ============
 manager_show_qr() {
     clear_screen
-    local port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
+    local port=$(grep -oP '(?<=-H )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
     # Читаем секрет из service файла
     local secret=$(grep -oP '(?<=-S )[0-9a-fA-F]+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null)
     [ -z "$secret" ] && secret="unknown"
@@ -296,7 +296,7 @@ manager_remove_tag() {
 # ============ СМЕНА ПОРТА ============
 manager_change_port() {
     clear_screen
-    local current_port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
+    local current_port=$(grep -oP '(?<=-H )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
     
     echo ""
     echo -e " ${BOLD}🔧 СМЕНА ПОРТА${NC}"
@@ -396,7 +396,7 @@ mtproxy_build_tg_msg() {
         status_icon="🟢"
     fi
     
-    local port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
+    local port=$(grep -oP '(?<=-H )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "443")
     local server_ip=$(get_server_ip)
     
     if [ "$mode" = "status" ]; then
@@ -641,7 +641,7 @@ show_manager_menu() {
         echo -e " MTProto: ${RED}❌ НЕ УСТАНОВЛЕН${NC}"
     fi
     
-    local port=$(grep -oP '(?<=-p )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "?")
+    local port=$(grep -oP '(?<=-H )\d+' /etc/systemd/system/${SERVICE_NAME}.service 2>/dev/null || echo "?")
     local server_ip=$(get_server_ip)
     echo " Сервер: $server_ip:$port"
     
