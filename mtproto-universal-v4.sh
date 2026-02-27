@@ -300,13 +300,16 @@ install_socks5() {
     fi
 
     # FIX: убран 'daemon' из конфига — systemd управляет процессом сам (Type=simple)
+    # FIX: добавлены nserver (DNS) — без них 3proxy не резолвит домены (ошибка curl 97)
     if [ "$USE_AUTH" = "1" ]; then
         echo "$SOCKS5_USER:CL:$SOCKS5_PASS" > "$SOCKS5_DIR/3proxy.passwd"
         chmod 600 "$SOCKS5_DIR/3proxy.passwd"
 
         cat > "$SOCKS5_DIR/3proxy.cfg" <<EOF
-maxconn 200
+nserver 8.8.8.8
+nserver 1.1.1.1
 nscache 65536
+maxconn 200
 timeouts 1 5 30 60 180 1800 15 60
 log /var/log/3proxy.log D
 logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
@@ -317,8 +320,10 @@ socks -p$SOCKS5_PORT
 EOF
     else
         cat > "$SOCKS5_DIR/3proxy.cfg" <<EOF
-maxconn 200
+nserver 8.8.8.8
+nserver 1.1.1.1
 nscache 65536
+maxconn 200
 timeouts 1 5 30 60 180 1800 15 60
 log /var/log/3proxy.log D
 logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
@@ -417,7 +422,9 @@ EOF
     echo -e "${CYAN}curl --socks5 $SERVER_IP:$SOCKS5_PORT https://ifconfig.me${NC}"
     echo ""
 
-    read -rp " Нажми Enter для продолжения... "
+    read -rp " Нажми Enter для открытия менеджера... "
+    # FIX: после установки SOCKS5 открываем менеджер
+    run_manager
 }
 
 # ============ УСТАНОВЩИК MTPROTO ============
