@@ -103,6 +103,12 @@ _tg_default_build_msg() {
 }
 
 # ============ ОТПРАВКА/ОБНОВЛЕНИЕ ============
+tg_delete_message() {
+    local chat_id="$1"
+    local message_id="$2"
+    tg_api_call "deleteMessage" -d "chat_id=$chat_id" -d "message_id=$message_id" >/dev/null 2>&1
+}
+
 tg_send_or_update() {
     local chat_id="$1"
     local mode="$2"
@@ -112,7 +118,18 @@ tg_send_or_update() {
     
     local result
     if [ -n "$msgid" ]; then
+        # Пробуем редактировать
         result=$(tg_edit_message "$chat_id" "$msgid" "$text" "HTML")
+        local ok=$(echo "$result" | grep -o '"ok":true')
+        
+        # Если ошибка (сообщение удалено/не найдено) — удаляем старое и отправляем новое
+        if [ -z "$ok" ]; then
+            tg_delete_message "$chat_id" "$msgid" 2>/dev/null
+            _tg_reset_msgid "$chat_id"
+            result=$(tg_send_message "$chat_id" "$text" "HTML")
+            msgid=$(echo "$result" | grep -o '"message_id":[0-9]*' | head -1 | cut -d: -f2)
+            [ -n "$msgid" ] && _tg_set_msgid "$chat_id" "$msgid"
+        fi
     else
         result=$(tg_send_message "$chat_id" "$text" "HTML")
         msgid=$(echo "$result" | grep -o '"message_id":[0-9]*' | head -1 | cut -d: -f2)
@@ -244,8 +261,8 @@ tg_setup_interactive() {
                 local chat_id="${TG_CHAT_IDS[$i]}"
                 local mode="${TG_CHAT_MODES[$i]}"
                 local name="${TG_CHAT_NAMES[$i]:-Chat $((i+1))}"
-                local mode_label="статус"
-                [ "$mode" = "full" ] && mode_label="полный"
+                local mode_label="только статус"
+                [ "$mode" = "full" ] && mode_label="полный (статус+ресурсы)"
                 echo "   $((i+1)). $name (ID: $chat_id) — $mode_label"
             done
         fi
