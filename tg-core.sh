@@ -237,10 +237,13 @@ tg_service_status() {
 # ============ ИНТЕРАКТИВНАЯ НАСТРОЙКА ============
 
 tg_setup_interactive() {
-    tg_load_config
+    # tg_load_config вызывается вызывающей стороной или здесь
+    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && [ -z "$TG_BOT_TOKEN" ] && tg_load_config
 
     while true; do
-        clear
+        # Перечитываем конфиг при каждом показе меню — подхватываем внешние изменения
+        tg_load_config
+        printf "[2J[H"  # clear без fork
         printf "${_C}${_B}"
         printf " ╔════════════════════════════════════════════╗\n"
         printf " ║     TG Core — Настройка уведомлений v1.1  ║\n"
