@@ -678,66 +678,37 @@ uninstall_mtproxy_silent() {
 
 
 # ============ TELEGRAM ИНТЕГРАЦИЯ ============
-TG_CONFIG="/opt/MTProxy/tg-notify.conf"
+# Подключаем ядро и задаём колбеки для MTProto
 
-tg_load_config() {
-    TG_BOT_TOKEN=""
-    TG_INTERVAL=60
-    declare -gA TG_CHATS 2>/dev/null || true
-    TG_CHAT_IDS=()
-    TG_CHAT_MODES=()
-    if [ -f "$TG_CONFIG" ]; then
-        source "$TG_CONFIG" 2>/dev/null || true
+TG_PROJECT_NAME="MTProto Proxy"
+TG_BUILD_MSG_FN="mtproto_tg_build_msg"
+
+_tg_core_load() {
+    if [ ! -f "/opt/tg-core/tg-core.sh" ]; then
+        return 1
+    fi
+    source /opt/tg-core/tg-core.sh
+    return 0
+}
+
+# Колбек: статус прокси (вызывается из tg-core при mode=status)
+tg_project_status() {
+    local server_ip proxy_port
+    server_ip=$(hostname -I | awk '{print $1}')
+    proxy_port=$(grep -oP '(?<=-H )\d+' "$SERVICE_FILE" 2>/dev/null || echo "N/A")
+
+    if systemctl is-active --quiet mtproto-proxy 2>/dev/null; then
+        printf "🔘 Статус: <b>✅ Работает</b>\n🖥 Сервер: <code>%s:%s</code>" \
+            "$server_ip" "$proxy_port"
+    else
+        printf "🔘 Статус: <b>❌ Остановлен</b>\n🖥 Сервер: <code>%s:%s</code>" \
+            "$server_ip" "$proxy_port"
     fi
 }
 
-tg_save_config() {
-    mkdir -p "$(dirname "$TG_CONFIG")"
-    {
-        echo "TG_BOT_TOKEN='$TG_BOT_TOKEN'"
-        echo "TG_INTERVAL=$TG_INTERVAL"
-        echo "TG_CHAT_IDS=(${TG_CHAT_IDS[*]+"${TG_CHAT_IDS[*]}"})"
-        echo "TG_CHAT_MODES=(${TG_CHAT_MODES[*]+"${TG_CHAT_MODES[*]}"})"
-    } > "$TG_CONFIG"
-    chmod 600 "$TG_CONFIG"
-}
-
-tg_send_message() {
-    local token="$1" chat_id="$2" text="$3"
-    local msg_id_file="/tmp/tg_msgid_${chat_id//[-]/_}"
-
-    # Пробуем редактировать существующее сообщение
-    if [ -f "$msg_id_file" ]; then
-        local msg_id
-        msg_id=$(cat "$msg_id_file")
-        local resp
-        resp=$(curl -s --max-time 5 "https://api.telegram.org/bot${token}/editMessageText" \
-            -d "chat_id=$chat_id" \
-            -d "message_id=$msg_id" \
-            --data-urlencode "text=$text" \
-            -d "parse_mode=HTML" 2>/dev/null)
-        # Если редактирование успешно — выходим
-        if echo "$resp" | grep -q '"ok":true'; then
-            return 0
-        fi
-        # Иначе сообщение устарело — отправляем новое
-        rm -f "$msg_id_file"
-    fi
-
-    # Отправляем новое сообщение и сохраняем message_id
-    local resp
-    resp=$(curl -s --max-time 5 "https://api.telegram.org/bot${token}/sendMessage" \
-        -d "chat_id=$chat_id" \
-        --data-urlencode "text=$text" \
-        -d "parse_mode=HTML" 2>/dev/null)
-    local new_id
-    new_id=$(echo "$resp" | grep -oP '"message_id":\K\d+' | head -1)
-    [ -n "$new_id" ] && echo "$new_id" > "$msg_id_file"
-}
-
-tg_build_message() {
-    local mode="$1"  # status | full
-    local proxy_port server_ip svc connections uptime_str cpu mem rss_mb
+# Колбек: полный отчёт (mode=full)
+tg_project_full_report() {
+    local server_ip proxy_port pid cpu mem rss_mb uptime_str connections svc
 
     server_ip=$(hostname -I | awk '{print $1}')
     proxy_port=$(grep -oP '(?<=-H )\d+' "$SERVICE_FILE" 2>/dev/null || echo "N/A")
@@ -746,330 +717,86 @@ tg_build_message() {
         svc="✅ Работает"
     else
         svc="❌ Остановлен"
-    fi
-
-    if [ "$mode" = "status" ]; then
-        # Короткий формат — только статус
-        echo "📡 <b>MTProto Proxy</b>
-🔘 Статус: <b>${svc}</b>
-🖥 Сервер: <code>${server_ip}:${proxy_port}</code>
-🕐 <i>$(date '+%d.%m.%Y %H:%M:%S')</i>"
+        printf "📡 <b>MTProto Proxy — Статистика</b>\n\n🔘 Статус: <b>%s</b>\n🖥 Сервер: <code>%s:%s</code>\n\n🕐 <i>%s</i>" \
+            "$svc" "$server_ip" "$proxy_port" "$(date '+%d.%m.%Y %H:%M:%S')"
         return
     fi
 
-    # Полный формат — статус + ресурсы + соединения
-    local pid
     pid=$(systemctl show -p MainPID mtproto-proxy 2>/dev/null | cut -d= -f2)
-
     if [ -n "$pid" ] && [ "$pid" != "0" ] && kill -0 "$pid" 2>/dev/null; then
         cpu=$(ps -p "$pid" -o %cpu= 2>/dev/null | xargs || echo "—")
         mem=$(ps -p "$pid" -o %mem= 2>/dev/null | xargs || echo "—")
-        local rss
-        rss=$(ps -p "$pid" -o rss= 2>/dev/null | xargs || echo "0")
+        local rss; rss=$(ps -p "$pid" -o rss= 2>/dev/null | xargs || echo "0")
         rss_mb=$(( rss / 1024 ))
-
-        local active_since
-        active_since=$(systemctl show -p ActiveEnterTimestamp mtproto-proxy 2>/dev/null | cut -d= -f2)
+        local active_since; active_since=$(systemctl show -p ActiveEnterTimestamp mtproto-proxy 2>/dev/null | cut -d= -f2)
         if [ -n "$active_since" ]; then
             local diff hh mm ss
             diff=$(( $(date +%s) - $(date -d "$active_since" +%s 2>/dev/null || echo 0) ))
-            hh=$(( diff / 3600 )); mm=$(( (diff % 3600) / 60 )); ss=$(( diff % 60 ))
+            hh=$(( diff/3600 )); mm=$(( (diff%3600)/60 )); ss=$(( diff%60 ))
             uptime_str=$(printf "%02d:%02d:%02d" $hh $mm $ss)
         else
             uptime_str="N/A"
         fi
-
         connections=$(ss -tn state established "( dport = :$proxy_port or sport = :$proxy_port )" \
             2>/dev/null | tail -n +2 | wc -l || echo "0")
     else
         cpu="—"; mem="—"; rss_mb="—"; uptime_str="—"; connections="—"
     fi
 
-    echo "📡 <b>MTProto Proxy — Статистика</b>
-
-🔘 Статус:    <b>${svc}</b>
-🖥 Сервер:    <code>${server_ip}:${proxy_port}</code>
-⏱ Аптайм:    <code>${uptime_str}</code>
-👥 Соединений: <b>${connections}</b>
-
-📊 <b>Ресурсы:</b>
-  CPU: <code>${cpu}%</code>
-  RAM: <code>${mem}%</code> (${rss_mb} MB)
-
-🕐 <i>$(date '+%d.%m.%Y %H:%M:%S')</i>"
+    printf "📡 <b>MTProto Proxy — Статистика</b>\n\n🔘 Статус:    <b>%s</b>\n🖥 Сервер:    <code>%s:%s</code>\n⏱ Аптайм:    <code>%s</code>\n👥 Соединений: <b>%s</b>\n\n📊 <b>Ресурсы:</b>\n  CPU: <code>%s%%</code>\n  RAM: <code>%s%%</code> (%s MB)\n\n🕐 <i>%s</i>" \
+        "$svc" "$server_ip" "$proxy_port" "$uptime_str" "$connections" \
+        "$cpu" "$mem" "$rss_mb" "$(date '+%d.%m.%Y %H:%M:%S')"
 }
 
-tg_notify_loop() {
-    # Запускается как фоновый демон через systemd-сервис
-    tg_load_config
-    while true; do
-        if [ -n "$TG_BOT_TOKEN" ] && [ ${#TG_CHAT_IDS[@]} -gt 0 ]; then
-            for i in "${!TG_CHAT_IDS[@]}"; do
-                local chat_id="${TG_CHAT_IDS[$i]}"
-                local mode="${TG_CHAT_MODES[$i]:-status}"
-                local msg
-                msg=$(tg_build_message "$mode")
-                tg_send_message "$TG_BOT_TOKEN" "$chat_id" "$msg"
-            done
-        fi
-        sleep "${TG_INTERVAL:-60}"
-    done
-}
-
-tg_create_service() {
-    local svc="/etc/systemd/system/mtproto-tgnotify.service"
-    cat > "$svc" << EOF
-[Unit]
-Description=MTProto Proxy Telegram Notifier
-After=network.target mtproto-proxy.service
-
-[Service]
-Type=simple
-ExecStart=$MANAGER_PATH --tg-daemon
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload > /dev/null 2>&1
-    systemctl enable mtproto-tgnotify > /dev/null 2>&1
-    systemctl restart mtproto-tgnotify > /dev/null 2>&1
-}
-
-tg_remove_service() {
-    systemctl stop mtproto-tgnotify 2>/dev/null || true
-    systemctl disable mtproto-tgnotify 2>/dev/null || true
-    rm -f /etc/systemd/system/mtproto-tgnotify.service
-    rm -f /tmp/tg_msgid_*
-    systemctl daemon-reload > /dev/null 2>&1
+# Функция-обёртка для построения сообщений (передаётся в tg-core как TG_BUILD_MSG_FN)
+mtproto_tg_build_msg() {
+    local mode="$1"
+    if [ "$mode" = "full" ]; then
+        tg_project_full_report
+    else
+        printf "📡 <b>MTProto Proxy</b>\n%s\n🕐 <i>%s</i>" \
+            "$(tg_project_status)" "$(date '+%d.%m.%Y %H:%M:%S')"
+    fi
 }
 
 manager_tg_settings() {
-    tg_load_config
-    while true; do
+    # Устанавливаем tg-core если не установлен
+    if [ ! -f "/opt/tg-core/tg-core.sh" ]; then
         clear_screen
         echo ""
-        echo -e " ${BOLD}🤖 TELEGRAM УВЕДОМЛЕНИЯ${NC}"
-        echo " ─────────────────────────────────────────────"
+        echo -e " ${BOLD}🤖 TELEGRAM ИНТЕГРАЦИЯ${NC}"
         echo ""
-
-        # Статус сервиса уведомлений
-        if systemctl is-active --quiet mtproto-tgnotify 2>/dev/null; then
-            echo -e " Сервис:   ${GREEN}✅ РАБОТАЕТ${NC}"
+        warning "tg-core.sh не установлен"
+        echo ""
+        echo " Для работы Telegram уведомлений нужно установить ядро tg-core."
+        echo ""
+        read -rp " Установить сейчас? (y/n): " install_tg
+        if [[ "$install_tg" =~ ^[Yy]$ ]]; then
+            info "Скачиваем tg-core.sh..."
+            mkdir -p /opt/tg-core
+            if curl -fsSL "https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/main/tg-core.sh" \
+                -o /opt/tg-core/tg-core.sh 2>/dev/null; then
+                chmod +x /opt/tg-core/tg-core.sh
+                success "tg-core.sh установлен"
+            else
+                warning "Не удалось скачать. Скопируй tg-core.sh вручную в /opt/tg-core/"
+                read -rp " Enter... "; return
+            fi
         else
-            echo -e " Сервис:   ${YELLOW}⚠️  ОСТАНОВЛЕН${NC}"
+            return
         fi
+    fi
 
-        if [ -n "$TG_BOT_TOKEN" ]; then
-            echo -e " Токен:    ${GREEN}✓ задан${NC} (${TG_BOT_TOKEN:0:10}...)"
-        else
-            echo -e " Токен:    ${RED}✗ не задан${NC}"
-        fi
+    # Загружаем ядро
+    if ! _tg_core_load; then
+        warning "Не удалось загрузить tg-core.sh"
+        read -rp " Enter... "; return
+    fi
 
-        echo -e " Интервал: ${CYAN}${TG_INTERVAL}с${NC}"
-        echo ""
-
-        if [ ${#TG_CHAT_IDS[@]} -gt 0 ]; then
-            echo -e " ${BOLD}Каналы/группы:${NC}"
-            for i in "${!TG_CHAT_IDS[@]}"; do
-                local mode_label
-                case "${TG_CHAT_MODES[$i]}" in
-                    status) mode_label="только статус" ;;
-                    full)   mode_label="статус + ресурсы" ;;
-                    *)      mode_label="${TG_CHAT_MODES[$i]}" ;;
-                esac
-                echo -e "  $((i+1))) ${CYAN}${TG_CHAT_IDS[$i]}${NC} — $mode_label"
-            done
-        else
-            echo -e " ${YELLOW}Каналы/группы не добавлены${NC}"
-        fi
-
-        echo ""
-        echo -e " ${CYAN}${BOLD}═════════════════════════════════════════════${NC}"
-        echo ""
-        echo " 1) 🔑 Задать токен бота"
-        echo " 2) ➕ Добавить канал/группу"
-        echo " 3) ➖ Удалить канал/группу"
-        echo " 4) ✏️  Изменить режим канала"
-        echo " 5) ⏱  Изменить интервал обновления"
-        echo " 6) 📤 Отправить тест сейчас"
-        echo " 7) ▶️  Запустить сервис уведомлений"
-        echo " 8) ⏹  Остановить сервис уведомлений"
-        echo " 9) 🗑  Удалить всё (токен, каналы, сервис)"
-        echo " 0) ← Назад"
-        echo ""
-        read -rp " Выбери: " tg_choice
-
-        case $tg_choice in
-            1)
-                echo ""
-                echo " Создай бота через @BotFather и скопируй токен."
-                echo " Формат: 1234567890:ABCdef..."
-                echo ""
-                read -rp " Токен: " new_token
-                if [ -n "$new_token" ]; then
-                    # Проверяем токен
-                    local test_resp
-                    test_resp=$(curl -s --max-time 5 "https://api.telegram.org/bot${new_token}/getMe" 2>/dev/null)
-                    if echo "$test_resp" | grep -q '"ok":true'; then
-                        local bot_name
-                        bot_name=$(echo "$test_resp" | grep -oP '"username":"\K[^"]+')
-                        TG_BOT_TOKEN="$new_token"
-                        tg_save_config
-                        success "Токен принят! Бот: @$bot_name"
-                    else
-                        warning "Токен не валиден или нет интернета"
-                    fi
-                fi
-                read -rp " Enter... "
-                ;;
-            2)
-                echo ""
-                echo " Как получить chat_id:"
-                echo "  • Канал: добавь бота как админа, перешли любое сообщение @userinfobot"
-                echo "  • Группа: добавь бота в группу, напиши /start, перешли @userinfobot"
-                echo "  • Формат: -1001234567890 (каналы/группы), 123456789 (личка)"
-                echo ""
-                read -rp " Chat ID: " new_chat_id
-                if [ -n "$new_chat_id" ]; then
-                    echo ""
-                    echo " Что показывать в этом чате?"
-                    echo " 1) Только статус (работает/нет)"
-                    echo " 2) Статус + ресурсы + соединения (полный)"
-                    echo ""
-                    read -rp " Выбор [1-2]: " mode_choice
-                    local new_mode
-                    case $mode_choice in
-                        2) new_mode="full" ;;
-                        *) new_mode="status" ;;
-                    esac
-                    TG_CHAT_IDS+=("$new_chat_id")
-                    TG_CHAT_MODES+=("$new_mode")
-                    tg_save_config
-                    success "Добавлен: $new_chat_id (режим: $new_mode)"
-                fi
-                read -rp " Enter... "
-                ;;
-            3)
-                if [ ${#TG_CHAT_IDS[@]} -eq 0 ]; then
-                    warning "Нет каналов для удаления"
-                    read -rp " Enter... "; continue
-                fi
-                echo ""
-                for i in "${!TG_CHAT_IDS[@]}"; do
-                    echo " $((i+1))) ${TG_CHAT_IDS[$i]}"
-                done
-                echo ""
-                read -rp " Номер для удаления: " del_idx
-                del_idx=$(( del_idx - 1 ))
-                if [ "$del_idx" -ge 0 ] && [ "$del_idx" -lt ${#TG_CHAT_IDS[@]} ]; then
-                    local removed_id="${TG_CHAT_IDS[$del_idx]}"
-                    TG_CHAT_IDS=("${TG_CHAT_IDS[@]:0:$del_idx}" "${TG_CHAT_IDS[@]:$((del_idx+1))}")
-                    TG_CHAT_MODES=("${TG_CHAT_MODES[@]:0:$del_idx}" "${TG_CHAT_MODES[@]:$((del_idx+1))}")
-                    tg_save_config
-                    rm -f "/tmp/tg_msgid_${removed_id//[-]/_}"
-                    success "Удалён"
-                else
-                    warning "Неверный номер"
-                fi
-                read -rp " Enter... "
-                ;;
-            4)
-                if [ ${#TG_CHAT_IDS[@]} -eq 0 ]; then
-                    warning "Нет каналов"; read -rp " Enter... "; continue
-                fi
-                echo ""
-                for i in "${!TG_CHAT_IDS[@]}"; do
-                    echo " $((i+1))) ${TG_CHAT_IDS[$i]} — ${TG_CHAT_MODES[$i]}"
-                done
-                echo ""
-                read -rp " Номер: " edit_idx
-                edit_idx=$(( edit_idx - 1 ))
-                if [ "$edit_idx" -ge 0 ] && [ "$edit_idx" -lt ${#TG_CHAT_IDS[@]} ]; then
-                    echo " 1) Только статус"
-                    echo " 2) Полный (статус + ресурсы)"
-                    read -rp " Выбор: " new_mode_choice
-                    case $new_mode_choice in
-                        2) TG_CHAT_MODES[$edit_idx]="full" ;;
-                        *) TG_CHAT_MODES[$edit_idx]="status" ;;
-                    esac
-                    tg_save_config
-                    success "Режим изменён"
-                fi
-                read -rp " Enter... "
-                ;;
-            5)
-                echo ""
-                read -rp " Интервал в секундах (мин. 10): " new_interval
-                if [[ "$new_interval" =~ ^[0-9]+$ ]] && [ "$new_interval" -ge 10 ]; then
-                    TG_INTERVAL=$new_interval
-                    tg_save_config
-                    # Перезапускаем сервис если работает
-                    systemctl is-active --quiet mtproto-tgnotify 2>/dev/null && \
-                        systemctl restart mtproto-tgnotify > /dev/null 2>&1
-                    success "Интервал: ${TG_INTERVAL}с"
-                else
-                    warning "Минимум 10 секунд"
-                fi
-                read -rp " Enter... "
-                ;;
-            6)
-                if [ -z "$TG_BOT_TOKEN" ]; then
-                    warning "Сначала задай токен (пункт 1)"
-                    read -rp " Enter... "; continue
-                fi
-                if [ ${#TG_CHAT_IDS[@]} -eq 0 ]; then
-                    warning "Добавь хотя бы один канал (пункт 2)"
-                    read -rp " Enter... "; continue
-                fi
-                echo ""
-                info "Отправляем тест..."
-                for i in "${!TG_CHAT_IDS[@]}"; do
-                    local chat_id="${TG_CHAT_IDS[$i]}"
-                    local mode="${TG_CHAT_MODES[$i]:-status}"
-                    local msg
-                    msg=$(tg_build_message "$mode")
-                    tg_send_message "$TG_BOT_TOKEN" "$chat_id" "$msg"
-                    echo -e " ${CYAN}→${NC} $chat_id — отправлено"
-                done
-                read -rp " Enter... "
-                ;;
-            7)
-                if [ -z "$TG_BOT_TOKEN" ]; then
-                    warning "Сначала задай токен (пункт 1)"
-                    read -rp " Enter... "; continue
-                fi
-                tg_create_service
-                sleep 1
-                systemctl is-active --quiet mtproto-tgnotify && \
-                    success "Сервис уведомлений запущен!" || \
-                    warning "Не удалось запустить"
-                read -rp " Enter... "
-                ;;
-            8)
-                systemctl stop mtproto-tgnotify 2>/dev/null || true
-                success "Сервис остановлен"
-                read -rp " Enter... "
-                ;;
-            9)
-                read -rp "⚠️  Удалить всё? (yes/no): " confirm
-                if [ "$confirm" = "yes" ]; then
-                    tg_remove_service
-                    TG_BOT_TOKEN=""
-                    TG_CHAT_IDS=()
-                    TG_CHAT_MODES=()
-                    TG_INTERVAL=60
-                    tg_save_config
-                    success "Telegram интеграция удалена"
-                fi
-                read -rp " Enter... "
-                ;;
-            0) return ;;
-            *) warning "Неверный выбор"; sleep 1 ;;
-        esac
-    done
+    # Открываем интерактивную настройку ядра
+    tg_setup_interactive
 }
+
 
 # ============ УСТАНОВКА КОМАНДЫ ============
 install_command() {
@@ -1088,7 +815,9 @@ install_command() {
 # ============ ОСНОВНОЙ ЦИКЛ ============
 # Режим демона для Telegram уведомлений (вызывается из systemd)
 if [ "${1:-}" = "--tg-daemon" ]; then
-    tg_notify_loop
+    # Загружаем ядро и запускаем демон с колбеками проекта
+    source /opt/tg-core/tg-core.sh 2>/dev/null || { echo "tg-core not found"; exit 1; }
+    tg_daemon_loop
     exit 0
 fi
 
