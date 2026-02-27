@@ -181,8 +181,12 @@ show_resource_live() {
                 uptime_str="N/A"
             fi
 
-            # FIX: только ESTABLISHED на нашем порту, без listen-сокета
-            connections=$(ss -tn state established "( dport = :$proxy_port or sport = :$proxy_port )" 2>/dev/null | tail -n +2 | wc -l || echo "0")
+            # Считаем только входящие соединения (клиенты → прокси)
+            connections=$(ss -tn state established "( dport = :$proxy_port )" 2>/dev/null | tail -n +2 | wc -l 2>/dev/null || echo "0")
+            # Fallback на netstat если ss не поддерживает фильтр
+            if ! ss -tn state established "( dport = :$proxy_port )" > /dev/null 2>&1; then
+                connections=$(netstat -tn 2>/dev/null | grep -c ":${proxy_port}[[:space:]]" || echo "0")
+            fi
 
             local cpu_int mem_int cpu_bars mem_bars
             cpu_int=$(printf "%.0f" "$cpu" 2>/dev/null || echo 0)
@@ -737,8 +741,7 @@ tg_project_full_report() {
         else
             uptime_str="N/A"
         fi
-        connections=$(ss -tn state established "( dport = :$proxy_port or sport = :$proxy_port )" \
-            2>/dev/null | tail -n +2 | wc -l || echo "0")
+        connections=$(ss -tn state established "( dport = :$proxy_port )" 2>/dev/null | tail -n +2 | wc -l || echo "0")
     else
         cpu="—"; mem="—"; rss_mb="—"; uptime_str="—"; connections="—"
     fi
