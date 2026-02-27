@@ -1,8 +1,8 @@
 #!/bin/bash
 # ==============================================
-# MTProto Proxy — Universal Manager v3.0
-# Установка + Менеджер в одном скрипте
-# github.com/tarpy-socdev/MTProto-VPS
+# MTProto Proxy — Universal Manager v4.0
+# Установка + Менеджер + SOCKS5 в одном скрипте
+# github.com/tarpy-socdev/MTP-manager
 # ==============================================
 set -e
 
@@ -16,7 +16,9 @@ NC=$'\033[0m'
 
 # ============ ПЕРЕМЕННЫЕ ============
 INSTALL_DIR="/opt/MTProxy"
+SOCKS5_DIR="/opt/socks5"
 SERVICE_FILE="/etc/systemd/system/mtproto-proxy.service"
+SOCKS5_SERVICE="/etc/systemd/system/socks5-proxy.service"
 LOGFILE="/tmp/mtproto-install.log"
 MANAGER_LINK="/usr/local/bin/mtproto-manager"
 
@@ -43,7 +45,7 @@ clear_screen() {
     clear
     echo -e "${CYAN}${BOLD}"
     echo " ╔════════════════════════════════════════════╗"
-    echo " ║  MTProto Proxy Manager v3.0                ║"
+    echo " ║  MTProto Proxy Manager v4.0 + SOCKS5       ║"
     echo " ║  github.com/tarpy-socdev/MTP-manager       ║"
     echo " ╚════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -104,6 +106,16 @@ check_installation() {
     fi
 }
 
+check_socks5_installation() {
+    if [ -f "$SOCKS5_SERVICE" ] && systemctl is-active --quiet socks5-proxy 2>/dev/null; then
+        return 0
+    elif [ -f "$SOCKS5_SERVICE" ]; then
+        return 1
+    else
+        return 2
+    fi
+}
+
 get_installation_status() {
     if check_installation; then
         echo 0
@@ -114,78 +126,257 @@ get_installation_status() {
     fi
 }
 
-[[ $EUID -ne 0 ]] && err "Запускай от root! (sudo bash script.sh)"
-
-# ============ ГЛАВНОЕ МЕНЮ ============
-show_start_menu() {
-    clear_screen
-    
-    local status
-    status=$(get_installation_status)
-    
-    echo ""
-    
-    if [ $status -eq 0 ]; then
-        echo -e " ${GREEN}✅ СТАТУС: ПРОКСИ УСТАНОВЛЕН И РАБОТАЕТ${NC}"
-        echo ""
-        echo -e " ${BOLD}🎯 Выбери действие:${NC}"
-        echo " ─────────────────────────────────────────────"
-        echo ""
-        echo " 1) 📊 Менеджер прокси"
-        echo " 2) ⚙️  Переустановить прокси"
-        echo " 3) 🚪 Выход"
-        echo ""
-        read -rp "Твой выбор [1-3]: " choice
-        
-        case $choice in
-            1) run_manager ;;
-            2) 
-                read -rp "⚠️ Это удалит текущий прокси. Ты уверен? (yes/no): " confirm
-                if [ "$confirm" = "yes" ]; then
-                    uninstall_mtproxy_silent
-                    run_installer
-                else
-                    info "Отменено"
-                fi
-                ;;
-            3) echo -e "${GREEN}До свидания! 👋${NC}"; exit 0 ;;
-            *) warning "Неправильный выбор"; sleep 1; show_start_menu ;;
-        esac
-    elif [ $status -eq 1 ]; then
-        echo -e " ${RED}❌ СТАТУС: ПРОКСИ УСТАНОВЛЕН НО НЕ РАБОТАЕТ${NC}"
-        echo ""
-        read -rp "Восстановить? (y/n): " restore
-        if [[ "$restore" =~ ^[Yy]$ ]]; then
-            systemctl restart mtproto-proxy
-            sleep 2
-            if systemctl is-active --quiet mtproto-proxy; then
-                success "Прокси восстановлен!"
-            else
-                warning "Не удалось восстановить"
-            fi
-        fi
-        sleep 1
-        show_start_menu
+get_socks5_status() {
+    if check_socks5_installation; then
+        echo 0
+    elif [ -f "$SOCKS5_SERVICE" ]; then
+        echo 1
     else
-        echo -e " ${YELLOW}⚠️  СТАТУС: ПРОКСИ НЕ УСТАНОВЛЕН${NC}"
-        echo ""
-        read -rp "Установить MTProto прокси? (y/n): " install_choice
-        if [[ "$install_choice" =~ ^[Yy]$ ]]; then
-            run_installer
-        else
-            info "Выход"
-            exit 0
-        fi
+        echo 2
     fi
 }
 
-# ============ УСТАНОВЩИК ============
+[[ $EUID -ne 0 ]] && err "Запускай от root! (sudo bash script.sh)"
+
+# ============ УСТАНОВКА SOCKS5 ============
+install_socks5() {
+    clear_screen
+    echo ""
+    echo -e "${BOLD}🔐 УСТАНОВКА SOCKS5 ПРОКСИ${NC}"
+    echo ""
+    
+    # Выбор порта для SOCKS5
+    echo -e "${BOLD}🔧 Выбери порт для SOCKS5:${NC}"
+    echo " 1) 1080 (стандартный SOCKS5 порт)"
+    echo " 2) 1085 (альтернативный)"
+    echo " 3) 9050 (Tor-стиль)"
+    echo " 4) Ввести свой порт"
+    echo ""
+    read -rp "Твой выбор [1-4]: " SOCKS_PORT_CHOICE
+
+    case $SOCKS_PORT_CHOICE in
+        1) SOCKS5_PORT=1080 ;;
+        2) SOCKS5_PORT=1085 ;;
+        3) SOCKS5_PORT=9050 ;;
+        4) 
+            read -rp "Введи порт (1-65535): " SOCKS5_PORT
+            validate_port "$SOCKS5_PORT"
+            ;;
+        *) 
+            info "Значение по умолчанию: 1080"
+            SOCKS5_PORT=1080
+            ;;
+    esac
+
+    check_port_available "$SOCKS5_PORT"
+    info "Используем порт: $SOCKS5_PORT"
+    echo ""
+
+    # Аутентификация
+    echo -e "${BOLD}🔑 Настроить аутентификацию?${NC}"
+    echo " 1) Да (логин + пароль)"
+    echo " 2) Нет (открытый доступ)"
+    echo ""
+    read -rp "Твой выбор [1-2]: " AUTH_CHOICE
+
+    USE_AUTH=0
+    if [ "$AUTH_CHOICE" = "1" ]; then
+        USE_AUTH=1
+        read -rp "Введи логин: " SOCKS5_USER
+        read -rsp "Введи пароль: " SOCKS5_PASS
+        echo ""
+        
+        if [ -z "$SOCKS5_USER" ] || [ -z "$SOCKS5_PASS" ]; then
+            warning "Логин или пароль пустой! Используем без аутентификации"
+            USE_AUTH=0
+        else
+            info "Аутентификация включена"
+        fi
+    else
+        info "Аутентификация отключена"
+    fi
+    echo ""
+
+    # Установка 3proxy
+    info "Устанавливаем 3proxy..."
+    (
+        apt update -y > "$LOGFILE" 2>&1
+        apt install -y 3proxy >> "$LOGFILE" 2>&1 || {
+            # Если 3proxy недоступен в репозитории, собираем из исходников
+            apt install -y gcc make git >> "$LOGFILE" 2>&1
+            cd /tmp
+            git clone https://github.com/3proxy/3proxy.git >> "$LOGFILE" 2>&1
+            cd 3proxy
+            make -f Makefile.Linux >> "$LOGFILE" 2>&1
+            mkdir -p /usr/local/3proxy/bin
+            cp bin/3proxy /usr/local/3proxy/bin/
+            chmod +x /usr/local/3proxy/bin/3proxy
+        }
+    ) &
+    spinner $! "Устанавливаем 3proxy..."
+
+    # Создаём директорию конфигурации
+    mkdir -p "$SOCKS5_DIR"
+    
+    # Создаём конфиг 3proxy
+    cat > "$SOCKS5_DIR/3proxy.cfg" <<EOF
+#!/usr/local/3proxy/bin/3proxy
+daemon
+maxconn 200
+nscache 65536
+timeouts 1 5 30 60 180 1800 15 60
+log /var/log/3proxy.log D
+logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
+archiver gz /usr/bin/gzip %F
+rotate 30
+EOF
+
+    if [ "$USE_AUTH" = "1" ]; then
+        # С аутентификацией
+        cat >> "$SOCKS5_DIR/3proxy.cfg" <<EOF
+users $SOCKS5_USER:CL:$SOCKS5_PASS
+auth strong
+allow $SOCKS5_USER
+socks -p$SOCKS5_PORT
+EOF
+    else
+        # Без аутентификации
+        cat >> "$SOCKS5_DIR/3proxy.cfg" <<EOF
+auth none
+allow *
+socks -p$SOCKS5_PORT
+EOF
+    fi
+
+    chmod 600 "$SOCKS5_DIR/3proxy.cfg"
+
+    # Создаём systemd сервис для SOCKS5
+    cat > "$SOCKS5_SERVICE" <<EOF
+[Unit]
+Description=3proxy SOCKS5 Proxy Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/3proxy $SOCKS5_DIR/3proxy.cfg
+ExecStop=/bin/kill -s TERM \$MAINPID
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Если 3proxy установлен не в стандартный путь
+    if [ -f "/usr/local/3proxy/bin/3proxy" ]; then
+        sed -i "s|/usr/bin/3proxy|/usr/local/3proxy/bin/3proxy|g" "$SOCKS5_SERVICE"
+    fi
+
+    success "Конфиг создан"
+
+    # Запускаем сервис
+    (
+        systemctl daemon-reload > /dev/null 2>&1
+        systemctl enable socks5-proxy > /dev/null 2>&1
+        systemctl restart socks5-proxy > /dev/null 2>&1
+    ) &
+    spinner $! "Запускаем SOCKS5 сервис..."
+
+    sleep 2
+
+    if ! systemctl is-active --quiet socks5-proxy; then
+        err "❌ SOCKS5 сервис не запустился!"
+    fi
+
+    success "SOCKS5 прокси запущен"
+
+    # UFW
+    if command -v ufw &>/dev/null; then
+        (
+            ufw delete allow "$SOCKS5_PORT/tcp" > /dev/null 2>&1 || true
+            ufw allow "$SOCKS5_PORT/tcp" > /dev/null 2>&1
+            UFW_STATUS=$(ufw status | head -1)
+            if echo "$UFW_STATUS" | grep -q "active"; then
+                ufw reload > /dev/null 2>&1
+            fi
+        ) &
+        spinner $! "Настраиваем UFW для SOCKS5..."
+    fi
+
+    # Получение IP
+    SERVER_IP=$(curl -s --max-time 3 https://api.ipify.org 2>/dev/null || \
+                curl -s --max-time 3 https://ifconfig.me 2>/dev/null || \
+                hostname -I | awk '{print $1}')
+
+    # Итоговая информация
+    clear_screen
+    echo ""
+    echo -e " ${GREEN}${BOLD}════════════════════════════════════════════${NC}"
+    echo -e " 🎉 SOCKS5 ПРОКСИ УСПЕШНО УСТАНОВЛЕН! 🎉"
+    echo -e " ${NC}"
+    echo ""
+    echo -e " ${YELLOW}Сервер:${NC} ${CYAN}$SERVER_IP${NC}"
+    echo -e " ${YELLOW}Порт:${NC} ${CYAN}$SOCKS5_PORT${NC}"
+    
+    if [ "$USE_AUTH" = "1" ]; then
+        echo -e " ${YELLOW}Логин:${NC} ${CYAN}$SOCKS5_USER${NC}"
+        echo -e " ${YELLOW}Пароль:${NC} ${CYAN}$SOCKS5_PASS${NC}"
+        echo ""
+        echo -e "${YELLOW}${BOLD}🔗 Строка подключения:${NC}"
+        echo -e "${GREEN}socks5://$SOCKS5_USER:$SOCKS5_PASS@$SERVER_IP:$SOCKS5_PORT${NC}"
+    else
+        echo ""
+        echo -e "${YELLOW}${BOLD}🔗 Строка подключения:${NC}"
+        echo -e "${GREEN}socks5://$SERVER_IP:$SOCKS5_PORT${NC}"
+    fi
+    
+    echo ""
+    echo -e "${YELLOW}${BOLD}📝 Для проверки:${NC}"
+    echo -e "${CYAN}curl --socks5 $SERVER_IP:$SOCKS5_PORT https://ifconfig.me${NC}"
+    echo ""
+    
+    read -rp " Нажми Enter для продолжения... "
+}
+
+# ============ УСТАНОВЩИК MTPROTO ============
 run_installer() {
     clear_screen
     echo ""
     
-    # ШАГ 1 — Выбор порта
-    echo -e "${BOLD}🔧 Выбери порт для прокси:${NC}"
+    # ШАГ 0 — SOCKS5
+    echo -e "${BOLD}🔐 Установить SOCKS5 прокси?${NC}"
+    echo " SOCKS5 — это универсальный прокси для любых приложений"
+    echo " (браузеры, мессенджеры, торренты и т.д.)"
+    echo ""
+    echo " 1) Да, установить SOCKS5 (рекомендуется)"
+    echo " 2) Нет, только MTProto"
+    echo ""
+    
+    socks5_status=$(get_socks5_status)
+    if [ $socks5_status -eq 0 ]; then
+        echo -e " ${GREEN}✅ SOCKS5 уже установлен и работает${NC}"
+        echo ""
+        read -rp "Переустановить SOCKS5? (y/n): " reinstall_socks
+        if [[ "$reinstall_socks" =~ ^[Yy]$ ]]; then
+            uninstall_socks5_silent
+            install_socks5
+        fi
+    else
+        read -rp "Твой выбор [1-2]: " SOCKS5_CHOICE
+        
+        if [ "$SOCKS5_CHOICE" = "1" ]; then
+            install_socks5
+        else
+            info "SOCKS5 пропущен"
+            echo ""
+        fi
+    fi
+    
+    # ШАГ 1 — Выбор порта MTProto
+    clear_screen
+    echo ""
+    echo -e "${BOLD}🔧 Выбери порт для MTProto прокси:${NC}"
     echo " 1) 443 (выглядит как HTTPS, лучший вариант)"
     echo " 2) 8080 (популярный альтернативный)"
     echo " 3) 8443 (ещё один безопасный)"
@@ -275,7 +466,7 @@ run_installer() {
 
     echo -e "${CYAN}✓ IP сервера: $SERVER_IP${NC}"
     echo ""
-    info "Начинаем установку..."
+    info "Начинаем установку MTProto..."
     echo ""
 
     # Системные зависимости
@@ -387,15 +578,15 @@ EOF
         systemctl enable mtproto-proxy > /dev/null 2>&1
         systemctl restart mtproto-proxy > /dev/null 2>&1
     ) &
-    spinner $! "Запускаем сервис..."
+    spinner $! "Запускаем MTProto сервис..."
 
     sleep 3
 
     if ! systemctl is-active --quiet mtproto-proxy; then
-        err "❌ Сервис не запустился!"
+        err "❌ MTProto сервис не запустился!"
     fi
 
-    success "Сервис запущен"
+    success "MTProto сервис запущен"
 
     # UFW
     if command -v ufw &>/dev/null; then
@@ -407,7 +598,7 @@ EOF
                 ufw reload > /dev/null 2>&1
             fi
         ) &
-        spinner $! "Настраиваем UFW..."
+        spinner $! "Настраиваем UFW для MTProto..."
     fi
 
     # ============ СПОНСОРСКИЙ ТАГ ============
@@ -463,6 +654,22 @@ EOF
     echo -e " 🎉 УСТАНОВКА УСПЕШНО ЗАВЕРШЕНА! 🎉"
     echo -e " ${NC}"
     echo ""
+    
+    # Показываем оба прокси если SOCKS5 установлен
+    socks5_status=$(get_socks5_status)
+    if [ $socks5_status -eq 0 ]; then
+        echo -e " ${YELLOW}${BOLD}🔐 SOCKS5 ПРОКСИ:${NC}"
+        SOCKS5_PORT=$(grep -oP '(?<=socks -p)\d+' "$SOCKS5_DIR/3proxy.cfg" 2>/dev/null || echo "1080")
+        if grep -q "^users" "$SOCKS5_DIR/3proxy.cfg" 2>/dev/null; then
+            SOCKS5_USER=$(grep "^users" "$SOCKS5_DIR/3proxy.cfg" | cut -d: -f1 | awk '{print $2}')
+            echo -e " ${CYAN}socks5://$SOCKS5_USER:*****@$SERVER_IP:$SOCKS5_PORT${NC}"
+        else
+            echo -e " ${CYAN}socks5://$SERVER_IP:$SOCKS5_PORT${NC}"
+        fi
+        echo ""
+    fi
+    
+    echo -e " ${YELLOW}${BOLD}📱 MTPROTO ПРОКСИ:${NC}"
     echo -e " ${YELLOW}Статус:${NC} $(echo -e $SVC_STATUS)"
     echo -e " ${YELLOW}Сервер:${NC} ${CYAN}$SERVER_IP${NC}"
     echo -e " ${YELLOW}Порт:${NC} ${CYAN}$PROXY_PORT${NC}"
@@ -500,67 +707,100 @@ show_manager_menu() {
     local status
     status=$(get_installation_status)
     
-    if [ $status -eq 0 ]; then
-        echo -e " ${GREEN}✅ СТАТУС: РАБОТАЕТ${NC}"
-    elif [ $status -eq 1 ]; then
-        echo -e " ${RED}❌ СТАТУС: ОСТАНОВЛЕН${NC}"
+    local socks5_status
+    socks5_status=$(get_socks5_status)
+    
+    echo ""
+    echo -e " ${BOLD}📊 СТАТУС СЕРВИСОВ:${NC}"
+    echo " ─────────────────────────────────────────────"
+    
+    # Статус SOCKS5
+    if [ $socks5_status -eq 0 ]; then
+        echo -e " SOCKS5:  ${GREEN}✅ РАБОТАЕТ${NC}"
+    elif [ $socks5_status -eq 1 ]; then
+        echo -e " SOCKS5:  ${RED}❌ ОСТАНОВЛЕН${NC}"
     else
-        echo -e " ${YELLOW}⚠️  СТАТУС: НЕ УСТАНОВЛЕН${NC}"
+        echo -e " SOCKS5:  ${YELLOW}⚠️  НЕ УСТАНОВЛЕН${NC}"
+    fi
+    
+    # Статус MTProto
+    if [ $status -eq 0 ]; then
+        echo -e " MTProto: ${GREEN}✅ РАБОТАЕТ${NC}"
+    elif [ $status -eq 1 ]; then
+        echo -e " MTProto: ${RED}❌ ОСТАНОВЛЕН${NC}"
+    else
+        echo -e " MTProto: ${YELLOW}⚠️  НЕ УСТАНОВЛЕН${NC}"
     fi
     
     echo ""
     echo -e " ${CYAN}${BOLD}═════════════════════════════════════════════${NC}"
     echo ""
     
-    if [ $status -ne 2 ]; then
-        echo -e " ${BOLD}📊 УПРАВЛЕНИЕ:${NC}"
-        echo " 1) 📈 Показать статус"
-        echo " 2) 📱 QR-код и ссылка"
-        echo " 3) 🏷️ Применить спонсорский тег"
-        echo " 4) ❌ Удалить спонсорский тег"
-        echo " 5) 🔧 Изменить порт"
-        echo " 6) 🔄 Перезагрузить сервис"
-        echo " 7) 📝 Просмотреть логи"
-        echo " 8) 🗑️ Удалить прокси"
-        echo ""
-    else
-        echo -e " ${BOLD}⚡ ПЕРВЫЙ ЗАПУСК:${NC}"
-        echo " 0) 📦 Установить прокси"
-        echo ""
-    fi
+    echo -e " ${BOLD}🔐 SOCKS5 УПРАВЛЕНИЕ:${NC}"
+    echo " S1) 📈 Статус SOCKS5"
+    echo " S2) 🔗 Показать подключение SOCKS5"
+    echo " S3) 🔄 Перезагрузить SOCKS5"
+    echo " S4) 📦 Установить SOCKS5 (если не установлен)"
+    echo " S5) 🗑️  Удалить SOCKS5"
+    echo ""
     
-    echo " 9) 🚪 Выход"
+    echo -e " ${BOLD}📱 MTPROTO УПРАВЛЕНИЕ:${NC}"
+    echo " M1) 📈 Показать статус MTProto"
+    echo " M2) 📱 QR-код и ссылка MTProto"
+    echo " M3) 🏷️  Применить спонсорский тег"
+    echo " M4) ❌ Удалить спонсорский тег"
+    echo " M5) 🔧 Изменить порт MTProto"
+    echo " M6) 🔄 Перезагрузить MTProto"
+    echo " M7) 📝 Просмотреть логи MTProto"
+    echo " M8) 🗑️  Удалить MTProto"
+    echo ""
+    
+    echo " 0) 🚪 Выход"
     echo ""
     echo -e " ${CYAN}${BOLD}═════════════════════════════════════════════${NC}"
     echo ""
     read -rp " Выбери опцию: " choice
     
     case $choice in
-        1) manager_show_status ;;
-        2) manager_show_qr ;;
-        3) manager_apply_tag ;;
-        4) manager_remove_tag ;;
-        5) manager_change_port ;;
-        6) manager_restart ;;
-        7) manager_show_logs ;;
-        8) 
-            read -rp "⚠️ Это удалит прокси. Ты уверен? (yes/no): " confirm
+        # SOCKS5
+        S1|s1) manager_socks5_status ;;
+        S2|s2) manager_socks5_show_connection ;;
+        S3|s3) manager_socks5_restart ;;
+        S4|s4) 
+            if [ $socks5_status -eq 2 ]; then
+                install_socks5
+            else
+                warning "SOCKS5 уже установлен!"
+                sleep 1
+            fi
+            ;;
+        S5|s5) 
+            read -rp "⚠️ Это удалит SOCKS5. Ты уверен? (yes/no): " confirm
+            if [ "$confirm" = "yes" ]; then
+                uninstall_socks5_silent
+                success "SOCKS5 удален"
+                sleep 1
+            fi
+            ;;
+        
+        # MTProto
+        M1|m1) manager_show_status ;;
+        M2|m2) manager_show_qr ;;
+        M3|m3) manager_apply_tag ;;
+        M4|m4) manager_remove_tag ;;
+        M5|m5) manager_change_port ;;
+        M6|m6) manager_restart ;;
+        M7|m7) manager_show_logs ;;
+        M8|m8) 
+            read -rp "⚠️ Это удалит MTProto. Ты уверен? (yes/no): " confirm
             if [ "$confirm" = "yes" ]; then
                 uninstall_mtproxy_silent
-                info "Прокси удален. Выход..."
+                success "MTProto удален"
                 sleep 1
-                exit 0
             fi
             ;;
+        
         0) 
-            if [ $status -eq 2 ]; then
-                run_installer
-            else
-                warning "Прокси уже установлен!"
-                sleep 1
-            fi
-            ;;
-        9) 
             echo -e "${GREEN}До свидания! 👋${NC}"
             exit 0
             ;;
@@ -571,17 +811,146 @@ show_manager_menu() {
     esac
 }
 
+# ============ SOCKS5 МЕНЕДЖЕР ============
+manager_socks5_status() {
+    clear_screen
+    echo ""
+    
+    if [ ! -f "$SOCKS5_SERVICE" ]; then
+        warning "SOCKS5 не установлен!"
+        read -rp " Нажми Enter для возврата... "
+        return
+    fi
+    
+    echo -e " ${YELLOW}${BOLD}✅ СТАТУС SOCKS5: ${NC}"
+    
+    if systemctl is-active --quiet socks5-proxy; then
+        echo -e " ${GREEN}РАБОТАЕТ${NC}"
+    else
+        echo -e " ${RED}ОСТАНОВЛЕН${NC}"
+    fi
+    
+    echo ""
+    echo -e " ${BOLD}📊 ИНФОРМАЦИЯ SOCKS5:${NC}"
+    echo " ─────────────────────────────────────────────"
+    
+    SOCKS5_PORT=$(grep -oP '(?<=socks -p)\d+' "$SOCKS5_DIR/3proxy.cfg" 2>/dev/null || echo "1080")
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    
+    echo " Сервер IP:  ${CYAN}$SERVER_IP${NC}"
+    echo " Порт:       ${CYAN}$SOCKS5_PORT${NC}"
+    
+    if grep -q "^users" "$SOCKS5_DIR/3proxy.cfg" 2>/dev/null; then
+        SOCKS5_USER=$(grep "^users" "$SOCKS5_DIR/3proxy.cfg" | cut -d: -f1 | awk '{print $2}')
+        echo " Логин:      ${CYAN}$SOCKS5_USER${NC}"
+        echo " Пароль:     ${CYAN}*****${NC}"
+        echo " Аутент.:    ${GREEN}ВКЛЮЧЕНА${NC}"
+    else
+        echo " Аутент.:    ${YELLOW}ОТКЛЮЧЕНА${NC}"
+    fi
+    
+    echo ""
+    echo -e " ${BOLD}📈 РЕСУРСЫ:${NC}"
+    echo " ─────────────────────────────────────────────"
+    ps aux | grep 3proxy | grep -v grep | awk '{printf " PID: %s | CPU: %s%% | MEM: %s%%\n", $2, $3, $4}' || echo " Процесс не найден"
+    
+    echo ""
+    echo -e " ${BOLD}📝 ПОСЛЕДНИЕ ЛОГИ (5 строк):${NC}"
+    echo " ─────────────────────────────────────────────"
+    journalctl -u socks5-proxy -n 5 --no-pager 2>/dev/null || echo " Логи недоступны"
+    
+    echo ""
+    read -rp " Нажми Enter для возврата в меню... "
+}
+
+manager_socks5_show_connection() {
+    clear_screen
+    echo ""
+    
+    if [ ! -f "$SOCKS5_SERVICE" ]; then
+        warning "SOCKS5 не установлен!"
+        read -rp " Нажми Enter для возврата... "
+        return
+    fi
+    
+    SERVER_IP=$(hostname -I | awk '{print $1}')
+    SOCKS5_PORT=$(grep -oP '(?<=socks -p)\d+' "$SOCKS5_DIR/3proxy.cfg" 2>/dev/null || echo "1080")
+    
+    echo -e " ${YELLOW}${BOLD}🔗 ПОДКЛЮЧЕНИЕ К SOCKS5:${NC}"
+    echo ""
+    
+    if grep -q "^users" "$SOCKS5_DIR/3proxy.cfg" 2>/dev/null; then
+        SOCKS5_USER=$(grep "^users" "$SOCKS5_DIR/3proxy.cfg" | cut -d: -f1 | awk '{print $2}')
+        SOCKS5_PASS=$(grep "^users" "$SOCKS5_DIR/3proxy.cfg" | cut -d: -f3)
+        
+        echo -e " ${CYAN}Сервер:${NC} $SERVER_IP"
+        echo -e " ${CYAN}Порт:${NC} $SOCKS5_PORT"
+        echo -e " ${CYAN}Логин:${NC} $SOCKS5_USER"
+        echo -e " ${CYAN}Пароль:${NC} $SOCKS5_PASS"
+        echo ""
+        echo -e " ${YELLOW}Строка подключения:${NC}"
+        echo -e " ${GREEN}socks5://$SOCKS5_USER:$SOCKS5_PASS@$SERVER_IP:$SOCKS5_PORT${NC}"
+    else
+        echo -e " ${CYAN}Сервер:${NC} $SERVER_IP"
+        echo -e " ${CYAN}Порт:${NC} $SOCKS5_PORT"
+        echo ""
+        echo -e " ${YELLOW}Строка подключения:${NC}"
+        echo -e " ${GREEN}socks5://$SERVER_IP:$SOCKS5_PORT${NC}"
+    fi
+    
+    echo ""
+    echo -e " ${YELLOW}${BOLD}💡 Проверка работы:${NC}"
+    echo -e " ${CYAN}curl --socks5 $SERVER_IP:$SOCKS5_PORT https://ifconfig.me${NC}"
+    echo ""
+    
+    read -rp " Нажми Enter для возврата в меню... "
+}
+
+manager_socks5_restart() {
+    clear_screen
+    echo ""
+    
+    if [ ! -f "$SOCKS5_SERVICE" ]; then
+        warning "SOCKS5 не установлен!"
+        read -rp " Нажми Enter для возврата... "
+        return
+    fi
+    
+    echo -e " ${BOLD}🔄 ПЕРЕЗАГРУЗИТЬ SOCKS5${NC}"
+    echo ""
+    
+    systemctl restart socks5-proxy > /dev/null 2>&1
+    sleep 2
+    
+    if systemctl is-active --quiet socks5-proxy; then
+        success "SOCKS5 сервис успешно перезагружен!"
+    else
+        err "Ошибка при перезагрузке SOCKS5!"
+    fi
+    
+    read -rp " Нажми Enter для возврата... "
+}
+
+uninstall_socks5_silent() {
+    systemctl stop socks5-proxy 2>/dev/null || true
+    systemctl disable socks5-proxy 2>/dev/null || true
+    rm -rf "$SOCKS5_DIR"
+    rm -f "$SOCKS5_SERVICE"
+    systemctl daemon-reload > /dev/null 2>&1
+}
+
+# ============ MTPROTO МЕНЕДЖЕР (старые функции) ============
 manager_show_status() {
     clear_screen
     echo ""
     
     if [ ! -f "$SERVICE_FILE" ]; then
-        warning "Прокси не установлен!"
+        warning "MTProto не установлен!"
         read -rp " Нажми Enter для возврата... "
         return
     fi
     
-    echo -e " ${YELLOW}${BOLD}✅ СТАТУС: ${NC}"
+    echo -e " ${YELLOW}${BOLD}✅ СТАТУС MTPROTO: ${NC}"
     
     if systemctl is-active --quiet mtproto-proxy; then
         echo -e " ${GREEN}РАБОТАЕТ${NC}"
@@ -631,7 +1000,7 @@ manager_show_qr() {
     echo ""
     
     if [ ! -f "$SERVICE_FILE" ]; then
-        warning "Прокси не установлен!"
+        warning "MTProto не установлен!"
         read -rp " Нажми Enter для возврата... "
         return
     fi
@@ -671,7 +1040,7 @@ manager_apply_tag() {
     echo ""
     
     if [ ! -f "$SERVICE_FILE" ]; then
-        warning "Прокси не установлен!"
+        warning "MTProto не установлен!"
         read -rp " Нажми Enter для возврата... "
         return
     fi
@@ -705,7 +1074,7 @@ manager_remove_tag() {
     echo ""
     
     if [ ! -f "$SERVICE_FILE" ]; then
-        warning "Прокси не установлен!"
+        warning "MTProto не установлен!"
         read -rp " Нажми Enter для возврата... "
         return
     fi
@@ -738,7 +1107,7 @@ manager_change_port() {
     echo ""
     
     if [ ! -f "$SERVICE_FILE" ]; then
-        warning "Прокси не установлен!"
+        warning "MTProto не установлен!"
         read -rp " Нажми Enter для возврата... "
         return
     fi
@@ -792,7 +1161,7 @@ manager_restart() {
     echo ""
     
     if [ ! -f "$SERVICE_FILE" ]; then
-        warning "Прокси не установлен!"
+        warning "MTProto не установлен!"
         read -rp " Нажми Enter для возврата... "
         return
     fi
@@ -804,9 +1173,9 @@ manager_restart() {
     sleep 2
     
     if systemctl is-active --quiet mtproto-proxy; then
-        success "Сервис успешно перезагружен!"
+        success "MTProto сервис успешно перезагружен!"
     else
-        err "Ошибка при перезагрузке сервиса!"
+        err "Ошибка при перезагрузке MTProto!"
     fi
     
     read -rp " Нажми Enter для возврата... "
@@ -849,12 +1218,16 @@ while true; do
     clear_screen
     
     status=$(get_installation_status)
+    socks5_status=$(get_socks5_status)
     
     echo ""
     
     if [ $status -eq 0 ]; then
-        # Прокси установлен и работает
-        echo -e " ${GREEN}✅ СТАТУС: ПРОКСИ УСТАНОВЛЕН И РАБОТАЕТ${NC}"
+        # MTProto установлен и работает
+        echo -e " ${GREEN}✅ СТАТУС: MTPROTO УСТАНОВЛЕН И РАБОТАЕТ${NC}"
+        if [ $socks5_status -eq 0 ]; then
+            echo -e " ${GREEN}✅ СТАТУС: SOCKS5 УСТАНОВЛЕН И РАБОТАЕТ${NC}"
+        fi
         echo ""
         echo -e " ${BOLD}🎯 Выбери действие:${NC}"
         echo " ─────────────────────────────────────────────"
@@ -879,24 +1252,27 @@ while true; do
         esac
     
     elif [ $status -eq 1 ]; then
-        # Прокси установлен но не работает
-        echo -e " ${RED}❌ СТАТУС: ПРОКСИ УСТАНОВЛЕН НО НЕ РАБОТАЕТ${NC}"
+        # MTProto установлен но не работает
+        echo -e " ${RED}❌ СТАТУС: MTPROTO УСТАНОВЛЕН НО НЕ РАБОТАЕТ${NC}"
         echo ""
         read -rp "Восстановить? (y/n): " restore
         if [[ "$restore" =~ ^[Yy]$ ]]; then
             systemctl restart mtproto-proxy
             sleep 2
             if systemctl is-active --quiet mtproto-proxy; then
-                success "Прокси восстановлен!"
+                success "MTProto восстановлен!"
             else
-                warning "Не удалось восстановить"
+                warning "Не удалось восстановить MTProto"
             fi
         fi
         sleep 2
     
     else
-        # Прокси не установлен
-        echo -e " ${YELLOW}⚠️  СТАТУС: ПРОКСИ НЕ УСТАНОВЛЕН${NC}"
+        # MTProto не установлен
+        echo -e " ${YELLOW}⚠️  СТАТУС: MTPROTO НЕ УСТАНОВЛЕН${NC}"
+        if [ $socks5_status -eq 0 ]; then
+            echo -e " ${GREEN}✅ SOCKS5 уже работает${NC}"
+        fi
         echo ""
         read -rp "Установить MTProto прокси? (y/n): " install_choice
         if [[ "$install_choice" =~ ^[Yy]$ ]]; then
