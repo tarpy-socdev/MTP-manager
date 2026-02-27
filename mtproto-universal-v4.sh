@@ -687,12 +687,18 @@ uninstall_mtproxy_silent() {
 TG_PROJECT_NAME="MTProto Proxy"
 TG_BUILD_MSG_FN="mtproto_tg_build_msg"
 
+# Флаг — ядро загружается только один раз
+_TG_CORE_LOADED=0
+
 _tg_core_load() {
+    [ "$_TG_CORE_LOADED" = "1" ] && return 0  # уже загружено
     if [ ! -f "/opt/tg-core/tg-core.sh" ]; then
         return 1
     fi
     source /opt/tg-core/tg-core.sh
-    return 0
+    local rc=$?
+    [ $rc -eq 0 ] && _TG_CORE_LOADED=1
+    return $rc
 }
 
 # Колбек: статус прокси (вызывается из tg-core при mode=status)
@@ -777,26 +783,30 @@ manager_tg_settings() {
         if [[ "$install_tg" =~ ^[Yy]$ ]]; then
             info "Скачиваем tg-core.sh..."
             mkdir -p /opt/tg-core
-            if curl -fsSL "https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/main/tg-core.sh" \
-                -o /opt/tg-core/tg-core.sh 2>/dev/null; then
-                chmod +x /opt/tg-core/tg-core.sh
-                success "tg-core.sh установлен"
-            else
-                warning "Не удалось скачать. Скопируй tg-core.sh вручную в /opt/tg-core/"
+            local dl_ok=0
+            # Пробуем скачать с GitHub
+            if curl -fsSL --max-time 15                 "https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/main/tg-core.sh"                 -o /opt/tg-core/tg-core.sh 2>/dev/null && [ -s /opt/tg-core/tg-core.sh ]; then
+                dl_ok=1
+            fi
+            if [ $dl_ok -eq 0 ]; then
+                warning "Не удалось скачать. Помести tg-core.sh вручную в /opt/tg-core/"
                 read -rp " Enter... "; return
             fi
+            chmod +x /opt/tg-core/tg-core.sh
+            success "tg-core.sh установлен"
         else
             return
         fi
     fi
 
-    # Загружаем ядро
+    # Загружаем ядро (один раз — повторные вызовы пропускаются)
     if ! _tg_core_load; then
         warning "Не удалось загрузить tg-core.sh"
         read -rp " Enter... "; return
     fi
 
-    # Открываем интерактивную настройку ядра
+    # Загружаем конфиг и открываем настройку
+    tg_load_config
     tg_setup_interactive
 }
 
