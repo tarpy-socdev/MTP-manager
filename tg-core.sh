@@ -205,6 +205,7 @@ tg_load_config() {
     TG_CHAT_IDS=()
     TG_CHAT_MODES=()
     TG_CHAT_NAMES=()
+    local TG_CHAT_NAMES_B64=()
     TG_UPDATE_INTERVAL=30
     
     [ -f "$TG_CORE_CONFIG" ] || return 0
@@ -216,9 +217,19 @@ tg_load_config() {
             TG_UPDATE_INTERVAL=*) TG_UPDATE_INTERVAL="${line#*=}" ;;
             TG_CHAT_IDS+=*) eval "$line" ;;
             TG_CHAT_MODES+=*) eval "$line" ;;
-            TG_CHAT_NAMES+=*) eval "$line" ;;
+            TG_CHAT_NAMES_B64+=*) eval "$line" ;;
+            TG_CHAT_NAMES+=*) eval "$line" ;;  # Legacy support
         esac
     done < "$TG_CORE_CONFIG"
+    
+    # Декодируем base64 имена если есть
+    if [ ${#TG_CHAT_NAMES_B64[@]} -gt 0 ]; then
+        TG_CHAT_NAMES=()
+        for name_b64 in "${TG_CHAT_NAMES_B64[@]}"; do
+            local name=$(echo -n "$name_b64" | base64 -d 2>/dev/null || echo "Chat")
+            TG_CHAT_NAMES+=("$name")
+        done
+    fi
 }
 
 tg_save_config() {
@@ -232,8 +243,10 @@ tg_save_config() {
         for mode in "${TG_CHAT_MODES[@]}"; do
             printf "TG_CHAT_MODES+=(%q)\n" "$mode"
         done
+        # Имена в base64 чтобы не ломались русские символы
         for name in "${TG_CHAT_NAMES[@]}"; do
-            printf "TG_CHAT_NAMES+=(%q)\n" "$name"
+            local name_b64=$(echo -n "$name" | base64 -w0 2>/dev/null)
+            echo "TG_CHAT_NAMES_B64+=($name_b64)"
         done
     } > "$TG_CORE_CONFIG"
 }
@@ -449,6 +462,15 @@ _tg_test() {
     [ ${#TG_CHAT_IDS[@]} -eq 0 ] && { echo " Нет чатов"; sleep 1; return; }
     
     echo ""
+    # Временно останавливаем демон чтобы не было дублей
+    local daemon_was_running=0
+    if systemctl is-active --quiet "$TG_SERVICE_NAME" 2>/dev/null; then
+        daemon_was_running=1
+        echo " Останавливаем демон..."
+        tg_service_stop
+        sleep 1
+    fi
+    
     echo " Тест отправки во все чаты..."
     for i in "${!TG_CHAT_IDS[@]}"; do
         local chat_id="${TG_CHAT_IDS[$i]}"
@@ -463,6 +485,13 @@ _tg_test() {
             echo -e "   ${_R}❌ Ошибка${_N}"
         fi
     done
+    
+    # Перезапускаем демон если был запущен
+    if [ $daemon_was_running -eq 1 ]; then
+        echo " Запускаем демон обратно..."
+        tg_service_start
+    fi
+    
     echo ""
     read -rp " Enter... "
 }
