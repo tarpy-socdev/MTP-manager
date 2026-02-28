@@ -1,566 +1,547 @@
 #!/bin/bash
-# ==============================================================================
-# TG-CORE v1.1 — Telegram Notification Engine (Independent)
-# ==============================================================================
-# Универсальное ядро для интеграции Telegram уведомлений в любой проект.
-# Проект подключает это ядро через source и задаёт свои колбеки.
-# ==============================================================================
+# ==============================================
+# TG Core — Telegram Notification Engine v1.1
+# Независимое ядро TG-уведомлений
+# github.com/tarpy-socdev/MTP-manager
+# ==============================================
+# ИСПОЛЬЗОВАНИЕ:
+#   Прямой запуск:  bash tg-core.sh [--setup|--daemon|--test|--status|--install]
+#   Интеграция:     source /opt/tg-core/tg-core.sh
+#
+# ПЕРЕМЕННЫЕ (задаются до source):
+#   TG_PROJECT_NAME  — имя проекта (по умолчанию: "Service")
+#   TG_BUILD_MSG_FN  — колбек построения сообщения: fn(mode)
+# ==============================================
 
-# ============ ЛОКАЛЬ ДЛЯ РУССКИХ СИМВОЛОВ ============
-export LANG=ru_RU.UTF-8
-export LC_ALL=ru_RU.UTF-8
+# ── Пути ──────────────────────────────────────
+TG_CORE_DIR="/opt/tg-core"
+TG_CORE_CONFIG="$TG_CORE_DIR/config.conf"
+TG_CORE_MSGIDS="$TG_CORE_DIR/msgids"
+TG_CORE_SERVICE="/etc/systemd/system/tg-core-notify.service"
+TG_CORE_SCRIPT="/opt/tg-core/tg-core.sh"
 
-# ============ ЦВЕТА (переопределяются проектом если нужно) ============
-_R="${_R:-$'\033[0;31m'}"
-_G="${_G:-$'\033[0;32m'}"
-_Y="${_Y:-$'\033[1;33m'}"
-_C="${_C:-$'\033[0;36m'}"
-_B="${_B:-$'\033[1m'}"
-_N="${_N:-$'\033[0m'}"
+# ── Цвета ─────────────────────────────────────
+if [ -t 1 ]; then
+    _R=$'\033[0;31m' _G=$'\033[0;32m' _Y=$'\033[1;33m'
+    _C=$'\033[0;36m' _B=$'\033[1m'    _N=$'\033[0m'
+else
+    _R="" _G="" _Y="" _C="" _B="" _N=""
+fi
 
-# ============ КОНФИГУРАЦИЯ ЯДРА ============
-TG_CORE_DIR="${TG_CORE_DIR:-/opt/tg-core}"
-TG_CORE_CONFIG="${TG_CORE_CONFIG:-$TG_CORE_DIR/config.conf}"
-TG_MSGID_DIR="${TG_MSGID_DIR:-$TG_CORE_DIR/msgids}"
-TG_SERVICE_NAME="${TG_SERVICE_NAME:-mtproto-tgnotify}"
-TG_DAEMON_PATH="${TG_DAEMON_PATH:-/usr/local/bin/mtproto-manager}"
-
-# Имя проекта (переопределяется проектом перед source)
 TG_PROJECT_NAME="${TG_PROJECT_NAME:-Service}"
 
-# Колбек для построения сообщения (переопределяется проектом)
-# Принимает: chat_id, mode (full/status)
-# Возвращает: текст сообщения
-TG_BUILD_MSG_FN="${TG_BUILD_MSG_FN:-_tg_default_build_msg}"
+# ============ CONFIG ============
 
-# ============ ПЕРЕМЕННЫЕ КОНФИГА ============
-TG_BOT_TOKEN=""
-TG_CHAT_IDS=()
-TG_CHAT_MODES=()
-TG_CHAT_NAMES=()
-TG_UPDATE_INTERVAL=30
+tg_load_config() {
+    TG_BOT_TOKEN=""
+    TG_INTERVAL=60
+    TG_CHAT_IDS=()
+    TG_CHAT_MODES=()
+    TG_CHAT_NAMES=()
+    if [ -f "$TG_CORE_CONFIG" ]; then
+        source "$TG_CORE_CONFIG" 2>/dev/null || true
+    fi
+    # Гарантируем что массивы одинаковой длины
+    local n=${#TG_CHAT_IDS[@]}
+    while [ ${#TG_CHAT_MODES[@]} -lt $n ]; do TG_CHAT_MODES+=("status"); done
+    while [ ${#TG_CHAT_NAMES[@]} -lt $n ]; do TG_CHAT_NAMES+=(""); done
+}
 
-# ============ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ============
+tg_save_config() {
+    mkdir -p "$TG_CORE_DIR" "$TG_CORE_MSGIDS"
+    {
+        printf "TG_BOT_TOKEN=%q\n" "$TG_BOT_TOKEN"
+        printf "TG_INTERVAL=%d\n" "$TG_INTERVAL"
+        # Массивы — каждый элемент на отдельной строке через printf %q
+        printf "TG_CHAT_IDS=(\n"
+        for v in "${TG_CHAT_IDS[@]+"${TG_CHAT_IDS[@]}"}"; do printf "  %q\n" "$v"; done
+        printf ")\n"
+        printf "TG_CHAT_MODES=(\n"
+        for v in "${TG_CHAT_MODES[@]+"${TG_CHAT_MODES[@]}"}"; do printf "  %q\n" "$v"; done
+        printf ")\n"
+        printf "TG_CHAT_NAMES=(\n"
+        for v in "${TG_CHAT_NAMES[@]+"${TG_CHAT_NAMES[@]}"}"; do printf "  %q\n" "$v"; done
+        printf ")\n"
+    } > "$TG_CORE_CONFIG"
+    chmod 600 "$TG_CORE_CONFIG"
+}
+
+# ============ ОТПРАВКА ============
+
+# FIX: уникальный файл для каждого chat_id — используем md5 от ID
 _tg_msgid_file() {
     local chat_id="$1"
-    # Используем md5 от chat_id чтобы избежать коллизий
-    local hash=$(echo -n "$chat_id" | md5sum | cut -d' ' -f1)
-    echo "$TG_MSGID_DIR/msgid_${hash}"
+    local hash
+    hash=$(echo -n "$chat_id" | md5sum | cut -c1-16)
+    echo "${TG_CORE_MSGIDS}/msgid_${hash}"
 }
 
-_tg_get_msgid() {
-    local chat_id="$1"
-    local file=$(_tg_msgid_file "$chat_id")
-    [ -f "$file" ] && cat "$file" || echo ""
+tg_reset_msgid() {
+    rm -f "$(_tg_msgid_file "$1")"
 }
 
-_tg_set_msgid() {
-    local chat_id="$1"
-    local msgid="$2"
-    mkdir -p "$TG_MSGID_DIR"
-    echo "$msgid" > "$(_tg_msgid_file "$chat_id")"
-}
+tg_send() {
+    local chat_id="$1" text="$2"
+    local token="$TG_BOT_TOKEN"
+    [ -z "$token" ] || [ -z "$chat_id" ] || [ -z "$text" ] && return 1
 
-_tg_reset_msgid() {
-    local chat_id="$1"
-    rm -f "$(_tg_msgid_file "$chat_id")"
-}
+    mkdir -p "$TG_CORE_MSGIDS"
+    local msgid_file
+    msgid_file=$(_tg_msgid_file "$chat_id")
 
-# ============ API ФУНКЦИИ ============
-tg_api_call() {
-    local method="$1"
-    shift
-    local url="https://api.telegram.org/bot${TG_BOT_TOKEN}/${method}"
-    curl -s -X POST "$url" "$@"
-}
-
-tg_send_message() {
-    local chat_id="$1"
-    local text="$2"
-    local parse_mode="${3:-}"
-    
-    local args=(-d "chat_id=$chat_id" -d "text=$text")
-    [ -n "$parse_mode" ] && args+=(-d "parse_mode=$parse_mode")
-    
-    tg_api_call "sendMessage" "${args[@]}"
-}
-
-tg_edit_message() {
-    local chat_id="$1"
-    local message_id="$2"
-    local text="$3"
-    local parse_mode="${4:-}"
-    
-    local args=(-d "chat_id=$chat_id" -d "message_id=$message_id" -d "text=$text")
-    [ -n "$parse_mode" ] && args+=(-d "parse_mode=$parse_mode")
-    
-    tg_api_call "editMessageText" "${args[@]}"
-}
-
-# ============ ПОСТРОЕНИЕ СООБЩЕНИЯ (ДЕФОЛТ) ============
-_tg_default_build_msg() {
-    local chat_id="$1"
-    local mode="$2"
-    echo "🤖 ${TG_PROJECT_NAME}
-Статус: работает
-Режим: $mode"
-}
-
-# ============ ОТПРАВКА/ОБНОВЛЕНИЕ ============
-tg_delete_message() {
-    local chat_id="$1"
-    local message_id="$2"
-    tg_api_call "deleteMessage" -d "chat_id=$chat_id" -d "message_id=$message_id" >/dev/null 2>&1
-}
-
-tg_send_or_update() {
-    local chat_id="$1"
-    local mode="$2"
-    
-    local text=$($TG_BUILD_MSG_FN "$chat_id" "$mode")
-    local msgid=$(_tg_get_msgid "$chat_id")
-    
-    local result
-    if [ -n "$msgid" ]; then
-        # Пробуем редактировать
-        result=$(tg_edit_message "$chat_id" "$msgid" "$text" "HTML")
-        local ok=$(echo "$result" | grep -o '"ok":true')
-        
-        # Если ошибка (сообщение удалено/не найдено) — удаляем старое и отправляем новое
-        if [ -z "$ok" ]; then
-            tg_delete_message "$chat_id" "$msgid" 2>/dev/null
-            _tg_reset_msgid "$chat_id"
-            result=$(tg_send_message "$chat_id" "$text" "HTML")
-            msgid=$(echo "$result" | grep -o '"message_id":[0-9]*' | head -1 | cut -d: -f2)
-            [ -n "$msgid" ] && _tg_set_msgid "$chat_id" "$msgid"
+    # Пробуем редактировать существующее сообщение
+    if [ -f "$msgid_file" ]; then
+        local msg_id
+        msg_id=$(cat "$msgid_file" 2>/dev/null)
+        if [ -n "$msg_id" ]; then
+            local resp
+            resp=$(curl -s --max-time 10 \
+                "https://api.telegram.org/bot${token}/editMessageText" \
+                -d "chat_id=${chat_id}" \
+                -d "message_id=${msg_id}" \
+                -d "parse_mode=HTML" \
+                --data-urlencode "text=${text}" 2>/dev/null)
+            if echo "$resp" | grep -q '"ok":true'; then
+                return 0
+            fi
+            # Сообщение удалено или недоступно — отправим новое
+            rm -f "$msgid_file"
         fi
+    fi
+
+    # Новое сообщение
+    local resp
+    resp=$(curl -s --max-time 10 \
+        "https://api.telegram.org/bot${token}/sendMessage" \
+        -d "chat_id=${chat_id}" \
+        -d "parse_mode=HTML" \
+        --data-urlencode "text=${text}" 2>/dev/null)
+
+    if echo "$resp" | grep -q '"ok":true'; then
+        local mid
+        mid=$(echo "$resp" | grep -oP '"message_id":\K\d+' | head -1)
+        [ -n "$mid" ] && echo "$mid" > "$msgid_file"
+        return 0
+    fi
+
+    local err
+    err=$(echo "$resp" | grep -oP '"description":"\K[^"]+' | head -1)
+    printf "[tg-core] ✗ %s: %s\n" "$chat_id" "${err:-нет ответа}" >&2
+    return 1
+}
+
+# ============ ПОСТРОЕНИЕ СООБЩЕНИЙ ============
+
+_tg_default_build_msg() {
+    local mode="$1"
+    if [ "$mode" = "status" ]; then
+        local status_line
+        declare -f tg_project_status > /dev/null 2>&1 \
+            && status_line=$(tg_project_status) \
+            || status_line="Статус неизвестен"
+        printf "📡 <b>%s</b>\n%s\n🕐 <i>%s</i>" \
+            "$TG_PROJECT_NAME" "$status_line" "$(date '+%d.%m.%Y %H:%M:%S')"
     else
-        result=$(tg_send_message "$chat_id" "$text" "HTML")
-        msgid=$(echo "$result" | grep -o '"message_id":[0-9]*' | head -1 | cut -d: -f2)
-        [ -n "$msgid" ] && _tg_set_msgid "$chat_id" "$msgid"
+        declare -f tg_project_full_report > /dev/null 2>&1 \
+            && tg_project_full_report \
+            || printf "📡 <b>%s</b>\n🕐 <i>%s</i>" "$TG_PROJECT_NAME" "$(date '+%d.%m.%Y %H:%M:%S')"
     fi
-    
-    # Проверка ошибки
-    local ok=$(echo "$result" | grep -o '"ok":true')
-    if [ -z "$ok" ]; then
-        local desc=$(echo "$result" | grep -o '"description":"[^"]*"' | cut -d'"' -f4)
-        echo "${_R}[TG ERROR]${_N} Chat $chat_id: ${desc:-unknown error}" >&2
-        return 1
+}
+
+tg_build_message() {
+    local mode="$1"
+    if [ -n "${TG_BUILD_MSG_FN:-}" ] && declare -f "$TG_BUILD_MSG_FN" > /dev/null 2>&1; then
+        "$TG_BUILD_MSG_FN" "$mode"
+    else
+        _tg_default_build_msg "$mode"
     fi
-    return 0
 }
 
 # ============ ДЕМОН ============
+
 tg_daemon_loop() {
+    # Ждём конфига при старте раньше времени
+    local attempts=0
     while true; do
-        for i in "${!TG_CHAT_IDS[@]}"; do
-            local chat_id="${TG_CHAT_IDS[$i]}"
-            local mode="${TG_CHAT_MODES[$i]}"
-            tg_send_or_update "$chat_id" "$mode" &
-        done
-        wait
-        sleep "$TG_UPDATE_INTERVAL"
+        tg_load_config
+        [ -n "$TG_BOT_TOKEN" ] && break
+        attempts=$(( attempts + 1 ))
+        [ $attempts -ge 60 ] && break
+        sleep 5
+    done
+
+    while true; do
+        tg_load_config  # подхватываем изменения без рестарта
+
+        if [ -n "$TG_BOT_TOKEN" ] && [ ${#TG_CHAT_IDS[@]} -gt 0 ]; then
+            for i in "${!TG_CHAT_IDS[@]}"; do
+                local cid="${TG_CHAT_IDS[$i]}"
+                local mode="${TG_CHAT_MODES[$i]:-status}"
+                local msg
+                msg=$(tg_build_message "$mode")
+                tg_send "$cid" "$msg"
+            done
+        fi
+
+        sleep "${TG_INTERVAL:-60}"
     done
 }
 
-# ============ УПРАВЛЕНИЕ СЕРВИСОМ ============
-tg_service_status() {
-    systemctl is-active --quiet "$TG_SERVICE_NAME" && echo "running" || echo "stopped"
-}
-
-tg_service_start() {
-    systemctl start "$TG_SERVICE_NAME" 2>/dev/null
-}
-
-tg_service_stop() {
-    systemctl stop "$TG_SERVICE_NAME" 2>/dev/null
-}
-
-tg_service_restart() {
-    systemctl restart "$TG_SERVICE_NAME" 2>/dev/null
-}
+# ============ SYSTEMD СЕРВИС ============
 
 tg_install_service() {
-    cat > "/etc/systemd/system/${TG_SERVICE_NAME}.service" <<EOF
+    # FIX: сервис всегда запускает tg-core.sh --daemon, не менеджер
+    local daemon_script="$TG_CORE_SCRIPT"
+
+    # Убеждаемся что ядро скопировано в постоянное место
+    if [ ! -f "$daemon_script" ]; then
+        mkdir -p "$TG_CORE_DIR"
+        cp "${BASH_SOURCE[0]}" "$daemon_script" 2>/dev/null || \
+        cp "$0" "$daemon_script" 2>/dev/null || true
+        chmod +x "$daemon_script" 2>/dev/null || true
+    fi
+
+    cat > "$TG_CORE_SERVICE" << EOF
 [Unit]
-Description=Telegram Notifications for ${TG_PROJECT_NAME}
-After=network.target
+Description=TG Core Notification Daemon
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=${TG_DAEMON_PATH} --tg-daemon
-Restart=always
+ExecStart=/bin/bash ${daemon_script} --daemon
+Restart=on-failure
 RestartSec=10
+Environment=TG_PROJECT_NAME=${TG_PROJECT_NAME}
+Environment=TG_BUILD_MSG_FN=${TG_BUILD_MSG_FN:-}
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload
-    systemctl enable "$TG_SERVICE_NAME"
+    systemctl daemon-reload > /dev/null 2>&1
+    systemctl enable tg-core-notify > /dev/null 2>&1
+    systemctl restart tg-core-notify > /dev/null 2>&1
 }
 
-# ============ КОНФИГ (ЗАГРУЗКА/СОХРАНЕНИЕ) ============
-tg_load_config() {
-    TG_BOT_TOKEN=""
-    TG_CHAT_IDS=()
-    TG_CHAT_MODES=()
-    TG_CHAT_NAMES=()
-    local TG_CHAT_NAMES_B64=()
-    TG_UPDATE_INTERVAL=30
-    
-    [ -f "$TG_CORE_CONFIG" ] || return 0
-    
-    local line
-    while IFS= read -r line; do
-        case "$line" in
-            TG_BOT_TOKEN=*) TG_BOT_TOKEN="${line#*=}" ;;
-            TG_UPDATE_INTERVAL=*) TG_UPDATE_INTERVAL="${line#*=}" ;;
-            TG_CHAT_IDS+=*) eval "$line" ;;
-            TG_CHAT_MODES+=*) eval "$line" ;;
-            TG_CHAT_NAMES_B64+=*) eval "$line" ;;
-            TG_CHAT_NAMES+=*) eval "$line" ;;  # Legacy support
-        esac
-    done < "$TG_CORE_CONFIG"
-    
-    # Декодируем base64 имена если есть
-    if [ ${#TG_CHAT_NAMES_B64[@]} -gt 0 ]; then
-        TG_CHAT_NAMES=()
-        for name_b64 in "${TG_CHAT_NAMES_B64[@]}"; do
-            local name=$(echo -n "$name_b64" | base64 -d 2>/dev/null || echo "Chat")
-            TG_CHAT_NAMES+=("$name")
-        done
-    fi
+tg_remove_service() {
+    systemctl stop tg-core-notify 2>/dev/null || true
+    systemctl disable tg-core-notify 2>/dev/null || true
+    rm -f "$TG_CORE_SERVICE"
+    systemctl daemon-reload > /dev/null 2>&1
 }
 
-tg_save_config() {
-    mkdir -p "$TG_CORE_DIR"
-    {
-        echo "TG_BOT_TOKEN=$TG_BOT_TOKEN"
-        echo "TG_UPDATE_INTERVAL=$TG_UPDATE_INTERVAL"
-        for id in "${TG_CHAT_IDS[@]}"; do
-            printf "TG_CHAT_IDS+=(%q)\n" "$id"
-        done
-        for mode in "${TG_CHAT_MODES[@]}"; do
-            printf "TG_CHAT_MODES+=(%q)\n" "$mode"
-        done
-        # Имена в base64 чтобы не ломались русские символы
-        for name in "${TG_CHAT_NAMES[@]}"; do
-            local name_b64=$(echo -n "$name" | base64 -w0 2>/dev/null)
-            echo "TG_CHAT_NAMES_B64+=($name_b64)"
-        done
-    } > "$TG_CORE_CONFIG"
+tg_service_status() {
+    systemctl is-active --quiet tg-core-notify 2>/dev/null
 }
 
 # ============ ИНТЕРАКТИВНАЯ НАСТРОЙКА ============
+
 tg_setup_interactive() {
+    # tg_load_config вызывается вызывающей стороной или здесь
+    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && [ -z "$TG_BOT_TOKEN" ] && tg_load_config
+
     while true; do
+        # Перечитываем конфиг при каждом показе меню — подхватываем внешние изменения
         tg_load_config
-        printf "\033[2J\033[H"  # clear без fork
-        echo ""
-        echo -e " ${_B}🤖 TELEGRAM ИНТЕГРАЦИЯ — ${TG_PROJECT_NAME}${_N}"
-        echo " ════════════════════════════════════════════"
-        echo ""
-        
-        if [ -z "$TG_BOT_TOKEN" ]; then
-            echo -e " ${_Y}⚠️  Бот не настроен${_N}"
+        printf "[2J[H"  # clear без fork
+        printf "${_C}${_B}"
+        printf " ╔════════════════════════════════════════════╗\n"
+        printf " ║     TG Core — Настройка уведомлений v1.1  ║\n"
+        printf " ╚════════════════════════════════════════════╝\n"
+        printf "${_N}\n"
+
+        if tg_service_status; then
+            printf " Сервис:   ${_G}✅ РАБОТАЕТ${_N}\n"
         else
-            echo -e " ${_G}✅ Бот:${_N} ${TG_BOT_TOKEN:0:10}...${TG_BOT_TOKEN: -5}"
+            printf " Сервис:   ${_Y}⏹  ОСТАНОВЛЕН${_N}\n"
         fi
-        
-        echo -e " ${_C}Интервал:${_N} ${TG_UPDATE_INTERVAL}с"
-        echo ""
-        
-        if [ ${#TG_CHAT_IDS[@]} -eq 0 ]; then
-            echo -e " ${_Y}Нет активных чатов${_N}"
+
+        if [ -n "$TG_BOT_TOKEN" ]; then
+            printf " Токен:    ${_G}✓ задан${_N} (%s...)\n" "${TG_BOT_TOKEN:0:12}"
         else
-            echo -e " ${_B}Активные чаты:${_N}"
+            printf " Токен:    ${_R}✗ не задан${_N}\n"
+        fi
+
+        printf " Интервал: ${_C}%sс${_N}\n\n" "$TG_INTERVAL"
+
+        if [ ${#TG_CHAT_IDS[@]} -gt 0 ]; then
+            printf " ${_B}Чаты:${_N}\n"
             for i in "${!TG_CHAT_IDS[@]}"; do
-                local chat_id="${TG_CHAT_IDS[$i]}"
-                local mode="${TG_CHAT_MODES[$i]}"
-                local name="${TG_CHAT_NAMES[$i]:-Chat $((i+1))}"
-                local mode_label="только статус"
-                [ "$mode" = "full" ] && mode_label="полный (статус+ресурсы)"
-                echo "   $((i+1)). $name (ID: $chat_id) — $mode_label"
+                local ml name
+                [ "${TG_CHAT_MODES[$i]}" = "full" ] && ml="полный" || ml="только статус"
+                name="${TG_CHAT_NAMES[$i]:-}"
+                [ -n "$name" ] && name=" (${_B}${name}${_N})" || name=""
+                printf "  %d) ${_C}%s${_N}%s — %s\n" "$((i+1))" "${TG_CHAT_IDS[$i]}" "$name" "$ml"
             done
+        else
+            printf " ${_Y}Чаты не добавлены${_N}\n"
         fi
-        
-        echo ""
-        echo " ════════════════════════════════════════════"
-        echo " 1) Настроить бот-токен"
-        echo " 2) Добавить чат/канал/группу"
-        echo " 3) Удалить чат"
-        echo " 4) Переименовать чат"
-        echo " 5) Изменить режим чата"
-        echo " 6) Изменить интервал обновления"
-        echo " 7) Отправить тест"
-        echo " 8) Статус сервиса"
-        echo " 0) Назад"
-        echo ""
-        read -rp " Выбор: " choice
-        
-        case $choice in
-            1) _tg_setup_token ;;
-            2) _tg_setup_add_chat ;;
-            3) _tg_setup_remove_chat ;;
-            4) _tg_setup_rename_chat ;;
-            5) _tg_setup_change_mode ;;
-            6) _tg_setup_interval ;;
-            7) _tg_test ;;
-            8) _tg_status ;;
+
+        printf "\n ─────────────────────────────────────────────\n"
+        printf " 1) 🔑 Задать токен\n"
+        printf " 2) ➕ Добавить чат/канал/группу\n"
+        printf " 3) ✏️  Изменить режим чата\n"
+        printf " 4) 🏷  Переименовать чат\n"
+        printf " 5) ➖ Удалить чат\n"
+        printf " 6) ⏱  Интервал обновления\n"
+        printf " 7) 📤 Тест — отправить сейчас\n"
+        printf " 8) ▶️  Запустить сервис\n"
+        printf " 9) ⏹  Остановить сервис\n"
+        printf " 10) 🗑 Удалить всё\n"
+        printf " 0) ← Назад\n\n"
+        read -rp " Выбери: " ch
+
+        case $ch in
+            1)  _tg_setup_token ;;
+            2)  _tg_setup_add_chat ;;
+            3)  _tg_setup_change_mode ;;
+            4)  _tg_setup_rename_chat ;;
+            5)  _tg_setup_del_chat ;;
+            6)  _tg_setup_interval ;;
+            7)  _tg_setup_test ;;
+            8)
+                tg_install_service
+                sleep 2
+                if tg_service_status; then
+                    printf " ${_G}✓ Сервис запущен${_N}\n"
+                else
+                    printf " ${_R}✗ Не удалось запустить. Лог:\n${_N}"
+                    journalctl -u tg-core-notify -n 10 --no-pager 2>/dev/null
+                fi
+                read -rp " Enter... "
+                ;;
+            9)
+                tg_remove_service
+                printf " ${_G}✓ Остановлен${_N}\n"
+                read -rp " Enter... "
+                ;;
+            10)
+                read -rp "⚠️  Удалить всё? (yes/no): " c
+                if [ "$c" = "yes" ]; then
+                    tg_remove_service
+                    rm -rf "$TG_CORE_MSGIDS"
+                    TG_BOT_TOKEN=""; TG_CHAT_IDS=(); TG_CHAT_MODES=()
+                    TG_CHAT_NAMES=(); TG_INTERVAL=60
+                    tg_save_config
+                    printf " ${_G}✓ Удалено${_N}\n"
+                fi
+                read -rp " Enter... "
+                ;;
             0) return 0 ;;
-            *) echo " Неверный выбор"; sleep 1 ;;
+            *) sleep 1 ;;
         esac
     done
 }
 
 _tg_setup_token() {
-    echo ""
-    read -rp " Введи токен бота: " token
-    [ -z "$token" ] && return
-    
-    local result=$(curl -s "https://api.telegram.org/bot${token}/getMe")
-    local ok=$(echo "$result" | grep -o '"ok":true')
-    
-    if [ -n "$ok" ]; then
-        TG_BOT_TOKEN="$token"
+    printf "\n Создай бота: @BotFather → /newbot\n Токен: 1234567890:ABCdef...\n\n"
+    read -rp " Токен: " new_token
+    [ -z "$new_token" ] && return
+    printf " Проверяем...\n"
+    local resp
+    resp=$(curl -s --max-time 8 "https://api.telegram.org/bot${new_token}/getMe" 2>/dev/null)
+    if echo "$resp" | grep -q '"ok":true'; then
+        local bot
+        bot=$(echo "$resp" | grep -oP '"username":"\K[^"]+')
+        TG_BOT_TOKEN="$new_token"
         tg_save_config
-        echo -e " ${_G}✅ Токен сохранён${_N}"
+        printf " ${_G}✓ Принят! @%s${_N}\n" "$bot"
     else
-        echo -e " ${_R}❌ Неверный токен${_N}"
+        local err
+        err=$(echo "$resp" | grep -oP '"description":"\K[^"]+')
+        printf " ${_R}✗ %s${_N}\n" "${err:-нет соединения}"
     fi
-    sleep 2
-}
-
-_tg_setup_add_chat() {
-    echo ""
-    read -rp " Введи chat_id (число или @username): " chat_id
-    [ -z "$chat_id" ] && return
-    
-    read -rp " Название чата: " chat_name
-    [ -z "$chat_name" ] && chat_name="Chat $((${#TG_CHAT_IDS[@]}+1))"
-    
-    echo ""
-    echo " Режим сообщения:"
-    echo "   1) Только статус (работает/не работает)"
-    echo "   2) Полный (статус + ресурсы + соединения)"
-    read -rp " Выбор [1-2]: " mode_choice
-    
-    local mode="status"
-    [ "$mode_choice" = "2" ] && mode="full"
-    
-    TG_CHAT_IDS+=("$chat_id")
-    TG_CHAT_MODES+=("$mode")
-    TG_CHAT_NAMES+=("$chat_name")
-    tg_save_config
-    
-    # Автоотправка первого сообщения
-    _tg_reset_msgid "$chat_id"
-    tg_send_or_update "$chat_id" "$mode"
-    
-    # Если это первый чат — запускаем демон
-    if [ ${#TG_CHAT_IDS[@]} -eq 1 ]; then
-        if [ ! -f "/etc/systemd/system/${TG_SERVICE_NAME}.service" ]; then
-            echo -e " ${_C}ℹ️  Устанавливаем systemd сервис...${_N}"
-            tg_install_service
-        fi
-        if ! systemctl is-active --quiet "$TG_SERVICE_NAME" 2>/dev/null; then
-            echo -e " ${_C}ℹ️  Запускаем демон обновлений...${_N}"
-            tg_service_start
-            sleep 1
-            if systemctl is-active --quiet "$TG_SERVICE_NAME"; then
-                echo -e " ${_G}✅ Демон запущен${_N}"
-            fi
-        fi
-    fi
-    
-    echo -e " ${_G}✅ Чат добавлен${_N}"
-    sleep 2
-}
-
-_tg_setup_remove_chat() {
-    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && { echo " Нет чатов"; sleep 1; return; }
-    
-    echo ""
-    read -rp " Номер чата для удаления: " num
-    num=$((num - 1))
-    
-    if [ $num -ge 0 ] && [ $num -lt ${#TG_CHAT_IDS[@]} ]; then
-        _tg_reset_msgid "${TG_CHAT_IDS[$num]}"
-        unset 'TG_CHAT_IDS[$num]'
-        unset 'TG_CHAT_MODES[$num]'
-        unset 'TG_CHAT_NAMES[$num]'
-        TG_CHAT_IDS=("${TG_CHAT_IDS[@]}")
-        TG_CHAT_MODES=("${TG_CHAT_MODES[@]}")
-        TG_CHAT_NAMES=("${TG_CHAT_NAMES[@]}")
-        tg_save_config
-        echo -e " ${_G}✅ Удалено${_N}"
-    else
-        echo -e " ${_R}Неверный номер${_N}"
-    fi
-    sleep 1
-}
-
-_tg_setup_rename_chat() {
-    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && { echo " Нет чатов"; sleep 1; return; }
-    
-    echo ""
-    read -rp " Номер чата: " num
-    num=$((num - 1))
-    
-    if [ $num -ge 0 ] && [ $num -lt ${#TG_CHAT_IDS[@]} ]; then
-        read -rp " Новое название: " new_name
-        [ -n "$new_name" ] && TG_CHAT_NAMES[$num]="$new_name"
-        tg_save_config
-        echo -e " ${_G}✅ Переименовано${_N}"
-    else
-        echo -e " ${_R}Неверный номер${_N}"
-    fi
-    sleep 1
-}
-
-_tg_setup_change_mode() {
-    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && { echo " Нет чатов"; sleep 1; return; }
-    
-    echo ""
-    read -rp " Номер чата: " num
-    num=$((num - 1))
-    
-    if [ $num -ge 0 ] && [ $num -lt ${#TG_CHAT_IDS[@]} ]; then
-        echo " 1) Только статус"
-        echo " 2) Полный"
-        read -rp " Выбор [1-2]: " mode_choice
-        
-        local new_mode="status"
-        [ "$mode_choice" = "2" ] && new_mode="full"
-        
-        TG_CHAT_MODES[$num]="$new_mode"
-        tg_save_config
-        
-        # Сбрасываем msgid чтобы отправить новое сообщение с новым режимом
-        _tg_reset_msgid "${TG_CHAT_IDS[$num]}"
-        tg_send_or_update "${TG_CHAT_IDS[$num]}" "$new_mode"
-        
-        echo -e " ${_G}✅ Режим изменён${_N}"
-    else
-        echo -e " ${_R}Неверный номер${_N}"
-    fi
-    sleep 1
-}
-
-_tg_setup_interval() {
-    echo ""
-    read -rp " Интервал обновления (сек, мин 10): " interval
-    interval=${interval:-30}
-    [ $interval -lt 10 ] && interval=10
-    TG_UPDATE_INTERVAL=$interval
-    tg_save_config
-    echo -e " ${_G}✅ Интервал: ${interval}с${_N}"
-    sleep 1
-}
-
-_tg_test() {
-    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && { echo " Нет чатов"; sleep 1; return; }
-    
-    echo ""
-    # Временно останавливаем демон чтобы не было дублей
-    local daemon_was_running=0
-    if systemctl is-active --quiet "$TG_SERVICE_NAME" 2>/dev/null; then
-        daemon_was_running=1
-        echo " Останавливаем демон..."
-        tg_service_stop
-        sleep 1
-    fi
-    
-    echo " Тест отправки во все чаты..."
-    for i in "${!TG_CHAT_IDS[@]}"; do
-        local chat_id="${TG_CHAT_IDS[$i]}"
-        local mode="${TG_CHAT_MODES[$i]}"
-        local name="${TG_CHAT_NAMES[$i]:-Chat $((i+1))}"
-        
-        echo " → $name..."
-        _tg_reset_msgid "$chat_id"  # Сброс msgid перед тестом
-        if tg_send_or_update "$chat_id" "$mode"; then
-            echo -e "   ${_G}✅ OK${_N}"
-        else
-            echo -e "   ${_R}❌ Ошибка${_N}"
-        fi
-    done
-    
-    # Перезапускаем демон если был запущен
-    if [ $daemon_was_running -eq 1 ]; then
-        echo " Запускаем демон обратно..."
-        tg_service_start
-    fi
-    
-    echo ""
     read -rp " Enter... "
 }
 
-_tg_status() {
-    local status=$(tg_service_status)
-    echo ""
-    if [ "$status" = "running" ]; then
-        echo -e " ${_G}✅ Сервис работает${_N}"
-        echo ""
-        echo " 1) Остановить"
-        echo " 2) Перезапустить"
-        echo " 0) Назад"
-        read -rp " Выбор: " schoice
-        case $schoice in
-            1) tg_service_stop; echo " Остановлен"; sleep 1 ;;
-            2) tg_service_restart; echo " Перезапущен"; sleep 1 ;;
-        esac
-    else
-        echo -e " ${_R}❌ Сервис остановлен${_N}"
-        echo ""
-        read -rp " Запустить? (y/n): " start
-        if [[ "$start" =~ ^[Yy]$ ]]; then
-            [ ! -f "/etc/systemd/system/${TG_SERVICE_NAME}.service" ] && tg_install_service
-            tg_service_start
-            sleep 1
-            [ "$(tg_service_status)" = "running" ] && echo -e " ${_G}✅ Запущен${_N}" || echo -e " ${_R}❌ Ошибка запуска${_N}"
-            sleep 2
+_tg_setup_add_chat() {
+    printf "\n ${_B}Как получить chat_id:${_N}\n"
+    printf "  Личка:  напиши боту /start → перешли @userinfobot\n"
+    printf "  Канал:  добавь бота как админа → @userinfobot\n"
+    printf "  Группа: добавь бота → /start → @userinfobot\n"
+    printf "  Формат: -1001234567890 (канал/группа)  123456789 (личка)\n\n"
+    read -rp " Chat ID: " new_id
+    [ -z "$new_id" ] && return
+
+    # Проверка дубликата
+    for ex in "${TG_CHAT_IDS[@]+"${TG_CHAT_IDS[@]}"}"; do
+        if [ "$ex" = "$new_id" ]; then
+            printf " ${_Y}Уже добавлен${_N}\n"; read -rp " Enter... "; return
         fi
+    done
+
+    read -rp " Название (необязательно, Enter пропустить): " new_name
+
+    printf "\n Режим:\n 1) Только статус\n 2) Полный (статус + ресурсы)\n\n"
+    read -rp " Выбор [1-2]: " mc
+    local new_mode; [ "$mc" = "2" ] && new_mode="full" || new_mode="status"
+
+    TG_CHAT_IDS+=("$new_id")
+    TG_CHAT_MODES+=("$new_mode")
+    TG_CHAT_NAMES+=("$new_name")
+    tg_save_config
+
+    # Сразу отправляем первое сообщение
+    if [ -n "$TG_BOT_TOKEN" ]; then
+        printf " Отправляем...\n"
+        local msg; msg=$(tg_build_message "$new_mode")
+        if tg_send "$new_id" "$msg"; then
+            printf " ${_G}✓ Добавлен, сообщение отправлено${_N}\n"
+        else
+            printf " ${_Y}⚠ Добавлен, но отправка не удалась\n  Проверь: chat_id верный, бот добавлен в чат, бот — админ в канале${_N}\n"
+        fi
+    else
+        printf " ${_G}✓ Добавлен${_N} (токен не задан)\n"
     fi
+    read -rp " Enter... "
 }
 
-# ============ CLI РЕЖИМЫ (если запускается напрямую) ============
+_tg_setup_change_mode() {
+    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && { printf " Нет чатов\n"; read -rp " Enter... "; return; }
+    printf "\n"
+    for i in "${!TG_CHAT_IDS[@]}"; do
+        local ml name
+        [ "${TG_CHAT_MODES[$i]}" = "full" ] && ml="полный" || ml="только статус"
+        name="${TG_CHAT_NAMES[$i]:-${TG_CHAT_IDS[$i]}}"
+        printf " %d) %s — %s\n" "$((i+1))" "$name" "$ml"
+    done
+    printf "\n"; read -rp " Номер: " idx; idx=$(( idx - 1 ))
+    if [ "$idx" -ge 0 ] && [ "$idx" -lt ${#TG_CHAT_IDS[@]} ]; then
+        printf " 1) Только статус\n 2) Полный\n\n"
+        read -rp " Выбор: " mc
+        local new_mode; [ "$mc" = "2" ] && new_mode="full" || new_mode="status"
+        TG_CHAT_MODES[$idx]="$new_mode"
+        tg_save_config
+        # Сбрасываем msgid и сразу отправляем новый формат
+        local cid="${TG_CHAT_IDS[$idx]}"
+        tg_reset_msgid "$cid"
+        if [ -n "$TG_BOT_TOKEN" ]; then
+            local msg; msg=$(tg_build_message "$new_mode")
+            tg_send "$cid" "$msg"
+        fi
+        printf " ${_G}✓ Изменён и отправлен${_N}\n"
+    else
+        printf " ${_Y}Неверный номер${_N}\n"
+    fi
+    read -rp " Enter... "
+}
+
+_tg_setup_rename_chat() {
+    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && { printf " Нет чатов\n"; read -rp " Enter... "; return; }
+    printf "\n"
+    for i in "${!TG_CHAT_IDS[@]}"; do
+        printf " %d) %s — «%s»\n" "$((i+1))" "${TG_CHAT_IDS[$i]}" "${TG_CHAT_NAMES[$i]:-без названия}"
+    done
+    printf "\n"; read -rp " Номер: " idx; idx=$(( idx - 1 ))
+    if [ "$idx" -ge 0 ] && [ "$idx" -lt ${#TG_CHAT_IDS[@]} ]; then
+        read -rp " Новое название (Enter — убрать): " new_name
+        TG_CHAT_NAMES[$idx]="$new_name"
+        tg_save_config
+        printf " ${_G}✓ Сохранено${_N}\n"
+    fi
+    read -rp " Enter... "
+}
+
+_tg_setup_del_chat() {
+    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && { printf " Нет чатов\n"; read -rp " Enter... "; return; }
+    printf "\n"
+    for i in "${!TG_CHAT_IDS[@]}"; do
+        local name="${TG_CHAT_NAMES[$i]:-${TG_CHAT_IDS[$i]}}"
+        printf " %d) %s\n" "$((i+1))" "$name"
+    done
+    printf "\n"; read -rp " Номер: " idx; idx=$(( idx - 1 ))
+    if [ "$idx" -ge 0 ] && [ "$idx" -lt ${#TG_CHAT_IDS[@]} ]; then
+        local removed="${TG_CHAT_IDS[$idx]}"
+        TG_CHAT_IDS=("${TG_CHAT_IDS[@]:0:$idx}"   "${TG_CHAT_IDS[@]:$((idx+1))}")
+        TG_CHAT_MODES=("${TG_CHAT_MODES[@]:0:$idx}" "${TG_CHAT_MODES[@]:$((idx+1))}")
+        TG_CHAT_NAMES=("${TG_CHAT_NAMES[@]:0:$idx}" "${TG_CHAT_NAMES[@]:$((idx+1))}")
+        tg_save_config
+        tg_reset_msgid "$removed"
+        printf " ${_G}✓ Удалён${_N}\n"
+    else
+        printf " ${_Y}Неверный номер${_N}\n"
+    fi
+    read -rp " Enter... "
+}
+
+_tg_setup_interval() {
+    printf "\n"
+    read -rp " Интервал сек (мин. 10, сейчас: ${TG_INTERVAL}): " val
+    if [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -ge 10 ]; then
+        TG_INTERVAL=$val
+        tg_save_config
+        tg_service_status && systemctl restart tg-core-notify > /dev/null 2>&1
+        printf " ${_G}✓ %sс${_N}\n" "$TG_INTERVAL"
+    else
+        printf " ${_Y}Минимум 10${_N}\n"
+    fi
+    read -rp " Enter... "
+}
+
+_tg_setup_test() {
+    [ -z "$TG_BOT_TOKEN" ] && { printf " ${_R}Сначала задай токен (п.1)${_N}\n"; read -rp " Enter... "; return; }
+    [ ${#TG_CHAT_IDS[@]} -eq 0 ] && { printf " ${_R}Добавь чат (п.2)${_N}\n"; read -rp " Enter... "; return; }
+    printf "\n"
+    local ok=0 fail=0
+    for i in "${!TG_CHAT_IDS[@]}"; do
+        local cid="${TG_CHAT_IDS[$i]}"
+        local mode="${TG_CHAT_MODES[$i]:-status}"
+        local name="${TG_CHAT_NAMES[$i]:-$cid}"
+        tg_reset_msgid "$cid"  # принудительно новое сообщение
+        local msg; msg=$(tg_build_message "$mode")
+        if tg_send "$cid" "$msg"; then
+            printf " ${_G}✓${_N} %s\n" "$name"; ok=$(( ok+1 ))
+        else
+            printf " ${_R}✗${_N} %s\n" "$name"; fail=$(( fail+1 ))
+        fi
+    done
+    printf "\n OK: %d  Ошибок: %d\n" "$ok" "$fail"
+    read -rp " Enter... "
+}
+
+# ============ ТОЧКА ВХОДА ============
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     case "${1:-}" in
+        --daemon)
+            tg_daemon_loop
+            ;;
         --setup)
+            [[ $EUID -ne 0 ]] && echo "Нужен root" && exit 1
             tg_load_config
             tg_setup_interactive
             ;;
-        --daemon)
-            tg_load_config
-            tg_daemon_loop
-            ;;
         --test)
             tg_load_config
-            _tg_test
+            _tg_setup_test
             ;;
         --status)
-            _tg_status
+            tg_load_config
+            printf "Токен:    %s\n" "${TG_BOT_TOKEN:+задан (${TG_BOT_TOKEN:0:12}...)}"
+            printf "Чатов:    %d\n" "${#TG_CHAT_IDS[@]}"
+            for i in "${!TG_CHAT_IDS[@]}"; do
+                printf "  [%d] %s «%s» режим=%s\n" \
+                    "$((i+1))" "${TG_CHAT_IDS[$i]}" \
+                    "${TG_CHAT_NAMES[$i]:-}" "${TG_CHAT_MODES[$i]}"
+            done
+            printf "Интервал: %sс\n" "$TG_INTERVAL"
+            tg_service_status && printf "Сервис:   ✅ работает\n" || printf "Сервис:   ⏹ остановлен\n"
             ;;
         --install)
-            tg_install_service
-            echo "Service installed: $TG_SERVICE_NAME"
+            [[ $EUID -ne 0 ]] && echo "Нужен root" && exit 1
+            mkdir -p "$TG_CORE_DIR"
+            cp "$0" "$TG_CORE_SCRIPT"
+            chmod +x "$TG_CORE_SCRIPT"
+            echo "✓ Установлен: $TG_CORE_SCRIPT"
             ;;
         *)
-            echo "TG-CORE v1.1 — Telegram Notification Engine"
-            echo ""
-            echo "Usage:"
-            echo "  $0 --setup     Interactive setup"
-            echo "  $0 --daemon    Run notification daemon"
-            echo "  $0 --test      Send test messages"
-            echo "  $0 --status    Check service status"
-            echo "  $0 --install   Install systemd service"
-            echo ""
-            echo "Integration:"
-            echo "  source $0"
-            echo "  TG_PROJECT_NAME='My Project'"
-            echo "  TG_BUILD_MSG_FN=my_build_msg_function"
-            echo "  tg_setup_interactive"
+            printf "tg-core.sh v1.1 — TG Notification Engine\n"
+            printf "Использование: %s [опция]\n\n" "$0"
+            printf "  --setup    Интерактивная настройка\n"
+            printf "  --daemon   Запуск демона (systemd)\n"
+            printf "  --test     Тест отправки\n"
+            printf "  --status   Статус конфига\n"
+            printf "  --install  Установить в %s\n" "$TG_CORE_SCRIPT"
             ;;
     esac
 fi
