@@ -1,15 +1,15 @@
 #!/bin/bash
 # ==============================================
-# MTProto Proxy — Universal Manager v4.4
+# MTProto Proxy — Universal Manager v4.5
 # Установка + Менеджер
 # github.com/tarpy-socdev/MTP-manager
 # ==============================================
-# CHANGELOG v4.4:
-# - Рефакторинг: вынесен сбор статистики в get_proxy_stats
-# - Удалена неиспользуемая функция generate_password
-# - check_port_available теперь не завершает скрипт, а возвращает код
-# - Усилены проверки загрузки tg-core
-# - Мелкие улучшения безопасности и читаемости
+# CHANGELOG v4.5:
+# - Исправлен live мониторинг (реальное обновление CPU/RAM)
+# - Добавлена смена часового пояса по городам
+# - Кастомные сообщения для Telegram
+# - Выровнены символы в меню
+# - Улучшена точность сбора статистики
 # ==============================================
 
 # ============ ЦВЕТА И СТИЛИ ============
@@ -17,6 +17,7 @@ RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[1;33m'
 CYAN=$'\033[0;36m'
+BLUE=$'\033[0;34m'
 BOLD=$'\033[1m'
 NC=$'\033[0m'
 
@@ -25,6 +26,7 @@ INSTALL_DIR="/opt/MTProxy"
 SERVICE_FILE="/etc/systemd/system/mtproto-proxy.service"
 LOGFILE="/tmp/mtproto-install.log"
 MANAGER_PATH="/usr/local/bin/mtproto-manager"
+TG_CUSTOM_MSG_FILE="/opt/tg-core/custom_message.txt"
 
 # ============ УТИЛИТЫ ============
 
@@ -48,10 +50,10 @@ warning() {
 clear_screen() {
     clear
     echo -e "${CYAN}${BOLD}"
-    echo " ╔════════════════════════════════════════════╗"
-    echo " ║     MTProto Proxy Manager v4.4             ║"
-    echo " ║     github.com/tarpy-socdev/MTP-manager    ║"
-    echo " ╚════════════════════════════════════════════╝"
+    echo " ╔═══════════════════════════════════════════════╗"
+    echo " ║      MTProto Proxy Manager v4.5               ║"
+    echo " ║      github.com/tarpy-socdev/MTP-manager      ║"
+    echo " ╚═══════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
 
@@ -84,7 +86,6 @@ validate_port() {
     return 0
 }
 
-# Возвращает 0, если порт свободен, иначе 1
 check_port_available() {
     local port=$1
     local skip_port=${2:-""}
@@ -126,72 +127,186 @@ get_installation_status() {
     fi
 }
 
-[[ $EUID -ne 0 ]] && err "Запускай от root! (sudo bash script.sh)"
+# ============ ЧАСОВОЙ ПОЯС ============
+TIMEZONE_DIR="/usr/share/zoneinfo"
+TIMEZONE_FILE="/etc/timezone"
+SYSTEM_TIMEZONE=$(cat "$TIMEZONE_FILE" 2>/dev/null || echo "Etc/UTC")
 
-# ============ СБОР СТАТИСТИКИ ПРОКСИ ============
-# Возвращает ассоциативный массив (через echo) со всеми метриками
+show_current_time() {
+    echo -e " ${CYAN}Текущее время:${NC} $(date '+%Y-%m-%d %H:%M:%S')"
+    echo -e " ${CYAN}Часовой пояс:${NC} $SYSTEM_TIMEZONE"
+}
+
+change_timezone() {
+    clear_screen
+    echo ""
+    echo -e " ${BOLD}🌍 СМЕНА ЧАСОВОГО ПОЯСА${NC}"
+    echo " ─────────────────────────────────────────────"
+    show_current_time
+    echo ""
+    echo -e " ${YELLOW}Выбери регион:${NC}"
+    echo " 1) Europe"
+    echo " 2) Asia"
+    echo " 3) America"
+    echo " 4) Africa"
+    echo " 5) Australia"
+    echo " 6) Pacific"
+    echo " 7) Atlantic"
+    echo " 8) Indian"
+    echo " 9) UTC (универсальное время)"
+    echo " 0) Назад"
+    echo ""
+    read -rp " Выбор: " region_choice
+
+    case $region_choice in
+        1) region="Europe" ;;
+        2) region="Asia" ;;
+        3) region="America" ;;
+        4) region="Africa" ;;
+        5) region="Australia" ;;
+        6) region="Pacific" ;;
+        7) region="Atlantic" ;;
+        8) region="Indian" ;;
+        9) 
+            timedatectl set-timezone UTC 2>/dev/null
+            SYSTEM_TIMEZONE="UTC"
+            success "Часовой пояс изменён на UTC"
+            read -rp " Enter для продолжения... "
+            return
+            ;;
+        0) return ;;
+        *) warning "Неверный выбор"; sleep 1; return ;;
+    esac
+
+    clear_screen
+    echo ""
+    echo -e " ${BOLD}🌍 Доступные города в ${region}:${NC}"
+    echo " ─────────────────────────────────────────────"
+    
+    local cities=()
+    local i=1
+    while IFS= read -r city; do
+        city_name=$(basename "$city")
+        cities+=("$city_name")
+        printf " %2d) %s\n" $i "$city_name"
+        i=$((i+1))
+    done < <(find "$TIMEZONE_DIR/$region" -type f 2>/dev/null | sort)
+    
+    echo ""
+    read -rp " Выбери город (1-$((i-1))): " city_choice
+    
+    if [[ "$city_choice" =~ ^[0-9]+$ ]] && [ "$city_choice" -ge 1 ] && [ "$city_choice" -lt $i ]; then
+        local selected_city="${cities[$((city_choice-1))]}"
+        local new_tz="$region/$selected_city"
+        
+        if timedatectl set-timezone "$new_tz" 2>/dev/null; then
+            SYSTEM_TIMEZONE="$new_tz"
+            success "Часовой пояс изменён на $new_tz"
+        else
+            warning "Не удалось изменить часовой пояс"
+        fi
+    else
+        warning "Неверный выбор"
+    fi
+    read -rp " Enter для продолжения... "
+}
+
+# ============ СБОР СТАТИСТИКИ ПРОКСИ (УЛУЧШЕННЫЙ) ============
 get_proxy_stats() {
     local -A stats
     local proxy_port server_ip pid
-
+    
     proxy_port=$(grep -oP '(?<=-H )\d+' "$SERVICE_FILE" 2>/dev/null || echo "N/A")
     server_ip=$(hostname -I | awk '{print $1}')
     stats[port]="$proxy_port"
     stats[ip]="$server_ip"
+    stats[update_time]=$(date '+%Y-%m-%d %H:%M:%S')
 
     if systemctl is-active --quiet mtproto-proxy 2>/dev/null; then
         stats[status]="active"
+        stats[status_text]="✅ РАБОТАЕТ"
+        stats[status_emoji]="✅"
     else
         stats[status]="inactive"
+        stats[status_text]="❌ ОСТАНОВЛЕН"
+        stats[status_emoji]="❌"
     fi
 
     pid=$(systemctl show -p MainPID mtproto-proxy 2>/dev/null | cut -d= -f2)
 
     if [ -n "$pid" ] && [ "$pid" != "0" ] && kill -0 "$pid" 2>/dev/null; then
         stats[pid]="$pid"
-        stats[cpu]=$(ps -p "$pid" -o %cpu= 2>/dev/null | xargs || echo "0.0")
-        stats[mem]=$(ps -p "$pid" -o %mem= 2>/dev/null | xargs || echo "0.0")
-        local rss
-        rss=$(ps -p "$pid" -o rss= 2>/dev/null | xargs || echo "0")
-        stats[rss_mb]=$(( rss / 1024 ))
+        
+        # Более точный сбор CPU (среднее за 1 секунду)
+        local cpu_sample1 cpu_sample2
+        cpu_sample1=$(ps -p "$pid" -o %cpu= 2>/dev/null | xargs || echo "0")
+        sleep 0.5
+        cpu_sample2=$(ps -p "$pid" -o %cpu= 2>/dev/null | xargs || echo "0")
+        stats[cpu]=$(echo "scale=1; ($cpu_sample1 + $cpu_sample2) / 2" | bc 2>/dev/null || echo "0.0")
+        
+        # RAM в MB и процентах
+        local mem_total_kb mem_used_kb
+        mem_total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        mem_used_kb=$(ps -p "$pid" -o rss= 2>/dev/null | xargs || echo "0")
+        
+        if [ -n "$mem_total_kb" ] && [ "$mem_total_kb" -gt 0 ]; then
+            stats[rss_mb]=$(( mem_used_kb / 1024 ))
+            stats[mem]=$(echo "scale=1; ($mem_used_kb * 100) / $mem_total_kb" | bc 2>/dev/null || echo "0.0")
+        else
+            stats[rss_mb]="0"
+            stats[mem]="0.0"
+        fi
 
-        local active_since
-        active_since=$(systemctl show -p ActiveEnterTimestamp mtproto-proxy 2>/dev/null | cut -d= -f2)
-        if [ -n "$active_since" ]; then
-            local start_epoch now_epoch diff hh mm ss
-            start_epoch=$(date -d "$active_since" +%s 2>/dev/null || echo 0)
-            now_epoch=$(date +%s)
-            diff=$(( now_epoch - start_epoch ))
-            hh=$(( diff / 3600 ))
-            mm=$(( (diff % 3600) / 60 ))
-            ss=$(( diff % 60 ))
-            stats[uptime]=$(printf "%02d:%02d:%02d" $hh $mm $ss)
+        # Аптайм процесса
+        local start_time now_time uptime_seconds
+        start_time=$(ps -p "$pid" -o lstart= 2>/dev/null)
+        if [ -n "$start_time" ]; then
+            now_time=$(date +%s)
+            start_epoch=$(date -d "$start_time" +%s 2>/dev/null || echo 0)
+            if [ "$start_epoch" -gt 0 ]; then
+                uptime_seconds=$(( now_time - start_epoch ))
+                local days=$(( uptime_seconds / 86400 ))
+                local hours=$(( (uptime_seconds % 86400) / 3600 ))
+                local mins=$(( (uptime_seconds % 3600) / 60 ))
+                local secs=$(( uptime_seconds % 60 ))
+                
+                if [ $days -gt 0 ]; then
+                    stats[uptime]="${days}д ${hours}ч ${mins}м"
+                else
+                    stats[uptime]=$(printf "%02d:%02d:%02d" $hours $mins $secs)
+                fi
+            else
+                stats[uptime]="N/A"
+            fi
         else
             stats[uptime]="N/A"
         fi
 
-        # Подсчёт соединений
+        # Подсчёт соединений (более точный)
         if command -v ss &>/dev/null; then
             stats[connections]=$(ss -tn state established "( dport = :$proxy_port )" 2>/dev/null | tail -n +2 | wc -l || echo "0")
+            # Добавляем входящие соединения
+            local inbound
+            inbound=$(ss -tn state established "( sport = :$proxy_port )" 2>/dev/null | tail -n +2 | wc -l || echo "0")
+            stats[connections]=$(( ${stats[connections]} + inbound ))
         else
             stats[connections]=$(netstat -tn 2>/dev/null | grep -c ":${proxy_port}[[:space:]]" || echo "0")
         fi
     else
         stats[pid]=""
-        stats[cpu]="—"
-        stats[mem]="—"
-        stats[rss_mb]="—"
+        stats[cpu]="0.0"
+        stats[mem]="0.0"
+        stats[rss_mb]="0"
         stats[uptime]="—"
-        stats[connections]="—"
+        stats[connections]="0"
     fi
 
-    # Возвращаем переменные как строку вида "key=value"
     for key in "${!stats[@]}"; do
         echo "$key=${stats[$key]}"
     done
 }
 
-# ============ МОНИТОРИНГ РЕСУРСОВ (живое обновление) ============
+# ============ МОНИТОРИНГ РЕСУРСОВ (ИСПРАВЛЕННЫЙ) ============
 show_resource_live() {
     if [ ! -f "$SERVICE_FILE" ]; then
         warning "MTProto не установлен!"
@@ -205,73 +320,478 @@ show_resource_live() {
     clear
 
     while true; do
-        read -t 0.9 -rsn1 key 2>/dev/null
+        read -t 1 -rsn1 key 2>/dev/null
         [[ "$key" == "q" || "$key" == "Q" ]] && break
 
-        # Получаем статистику
+        # Получаем свежую статистику
         local -A stats
         while IFS='=' read -r key value; do
             stats["$key"]="$value"
         done < <(get_proxy_stats)
 
+        # Создаем графики
         local cpu_bar="" mem_bar=""
-        local cpu mem cpu_int mem_int
-        cpu="${stats[cpu]}"
-        mem="${stats[mem]}"
+        local cpu_int mem_int
+        
+        cpu_int=$(printf "%.0f" "${stats[cpu]}" 2>/dev/null || echo 0)
+        mem_int=$(printf "%.0f" "${stats[mem]}" 2>/dev/null || echo 0)
+        
+        local cpu_bars=$(( cpu_int / 5 ))
+        [ $cpu_bars -gt 20 ] && cpu_bars=20
+        local mem_bars=$(( mem_int / 5 ))
+        [ $mem_bars -gt 20 ] && mem_bars=20
 
-        if [ "${stats[status]}" = "active" ] && [ -n "${stats[pid]}" ]; then
-            cpu_int=$(printf "%.0f" "$cpu" 2>/dev/null || echo 0)
-            mem_int=$(printf "%.0f" "$mem" 2>/dev/null || echo 0)
-            local cpu_bars=$(( cpu_int / 5 )); [ $cpu_bars -gt 20 ] && cpu_bars=20
-            local mem_bars=$(( mem_int / 5 )); [ $mem_bars -gt 20 ] && mem_bars=20
+        for ((i=0; i<cpu_bars; i++)); do cpu_bar+="${GREEN}█${NC}"; done
+        for ((i=cpu_bars; i<20; i++)); do cpu_bar+="░"; done
+        for ((i=0; i<mem_bars; i++)); do mem_bar+="${YELLOW}█${NC}"; done
+        for ((i=mem_bars; i<20; i++)); do mem_bar+="░"; done
 
-            for ((i=0; i<cpu_bars; i++));  do cpu_bar+="${GREEN}█${NC}"; done
-            for ((i=cpu_bars; i<20; i++)); do cpu_bar+="░"; done
-            for ((i=0; i<mem_bars; i++));  do mem_bar+="${YELLOW}█${NC}"; done
-            for ((i=mem_bars; i<20; i++)); do mem_bar+="░"; done
-        else
-            cpu_bar="░░░░░░░░░░░░░░░░░░░░"
-            mem_bar="░░░░░░░░░░░░░░░░░░░░"
-        fi
-
+        # Логи
         local term_width log_width logs
         term_width=$(tput cols 2>/dev/null || echo 80)
-        log_width=$(( term_width - 3 ))
+        log_width=$(( term_width - 4 ))
         logs=$(journalctl -u mtproto-proxy -n 5 --no-pager --output=short 2>/dev/null \
-            | cut -c1-"$log_width" | sed 's/^/ /' || echo " Логи недоступны")
+            | cut -c1-"$log_width" | sed 's/^/  /' || echo "  Логи недоступны")
 
         tput cup 0 0
 
-        printf "${CYAN}${BOLD}"
-        printf " ╔════════════════════════════════════════════╗\n"
-        printf " ║     MTProto Proxy — Live Monitor           ║\n"
-        printf " ║     %s  [q — выход]               ║\n" "$(date '+%H:%M:%S')"
-        printf " ╚════════════════════════════════════════════╝\n"
-        printf "${NC}\n"
-        if [ "${stats[status]}" = "active" ]; then
-            printf " Статус:      ${GREEN}✅ РАБОТАЕТ${NC}\n"
-        else
-            printf " Статус:      ${RED}❌ ОСТАНОВЛЕН${NC}\n"
-        fi
-        printf " Сервер:      ${CYAN}%s:%s${NC}\n" "${stats[ip]}" "${stats[port]}"
-        printf " Аптайм:      ${CYAN}%s${NC}\n" "${stats[uptime]}"
-        printf " Соединений:  ${CYAN}%s${NC}\n" "${stats[connections]}"
-        printf "\n"
-        printf " CPU: $(echo -e "$cpu_bar") ${CYAN}%s%%${NC}\n" "$cpu"
-        printf " RAM: $(echo -e "$mem_bar") ${CYAN}%s%%${NC} (%s MB)\n" "$mem" "${stats[rss_mb]}"
-        printf "\n"
-        printf " ${BOLD}📝 Последние логи:${NC}\n"
-        printf " ─────────────────────────────────────────────\n"
-        while IFS= read -r line; do
-            printf "%s$(tput el)\n" "$line"
-        done <<< "$logs"
+        # Верхняя рамка (фиксированной ширины)
+        echo -e "${CYAN}${BOLD}"
+        echo " ╔══════════════════════════════════════════════════════════╗"
+        printf " ║      MTProto Proxy — Live Monitor                        ║\n"
+        printf " ║      %s  [q — выход]                         ║\n" "$(date '+%H:%M:%S')"
+        echo " ╚══════════════════════════════════════════════════════════╝"
+        echo -e "${NC}"
+        
+        # Статус
+        echo -e " Статус:      ${stats[status_text]}"
+        echo -e " Сервер:      ${CYAN}${stats[ip]}:${stats[port]}${NC}"
+        echo -e " Обновлено:   ${CYAN}${stats[update_time]}${NC}"
+        echo -e " Аптайм:      ${CYAN}${stats[uptime]}${NC}"
+        echo -e " Соединений:  ${CYAN}${stats[connections]}${NC}"
+        echo ""
+        
+        # Графики с точными значениями
+        printf " CPU: %s ${CYAN}%s%%${NC}\n" "$(echo -e "$cpu_bar")" "${stats[cpu]}"
+        printf " RAM: %s ${CYAN}%s%%${NC} (%s MB)\n" "$(echo -e "$mem_bar")" "${stats[mem]}" "${stats[rss_mb]}"
+        echo ""
+        
+        # Логи
+        echo -e " ${BOLD}📝 Последние логи:${NC}"
+        echo " ───────────────────────────────────────────────────"
+        echo "$logs"
+        
         tput ed 2>/dev/null
-
     done
 
     tput cnorm 2>/dev/null
     tput rmcup 2>/dev/null
     trap - INT TERM
+}
+
+# ============ TELEGRAM ИНТЕГРАЦИЯ С КАСТОМНЫМИ СООБЩЕНИЯМИ ============
+TG_PROJECT_NAME="MTProto Proxy"
+TG_BUILD_MSG_FN="mtproto_tg_build_msg"
+
+_TG_CORE_LOADED=0
+
+_tg_core_load() {
+    [ "$_TG_CORE_LOADED" = "1" ] && return 0
+    if [ ! -f "/opt/tg-core/tg-core.sh" ]; then
+        return 1
+    fi
+    source /opt/tg-core/tg-core.sh
+    local rc=$?
+    if [ $rc -eq 0 ] && type tg_daemon_loop &>/dev/null; then
+        _TG_CORE_LOADED=1
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Загрузка кастомного сообщения
+load_custom_message() {
+    if [ -f "$TG_CUSTOM_MSG_FILE" ]; then
+        cat "$TG_CUSTOM_MSG_FILE"
+    else
+        # Сообщение по умолчанию
+        cat > "$TG_CUSTOM_MSG_FILE" << 'EOF'
+📡 <b>MTProto Proxy — Статус</b>
+
+🔘 Статус: {status}
+🖥 Сервер: {server}:{port}
+⏱ Аптайм: {uptime}
+👥 Соединений: {connections}
+
+📊 Ресурсы:
+  CPU: {cpu}%
+  RAM: {ram}% ({ram_mb} MB)
+
+🕐 Обновлено: {update_time}
+EOF
+        cat "$TG_CUSTOM_MSG_FILE"
+    fi
+}
+
+# Сохранение кастомного сообщения
+save_custom_message() {
+    local msg="$1"
+    echo "$msg" > "$TG_CUSTOM_MSG_FILE"
+}
+
+# Функция для замены переменных в сообщении
+format_custom_message() {
+    local template="$1"
+    local -n stats_ref="$2"
+    
+    local result="$template"
+    result="${result//\{status\}/${stats_ref[status_emoji]} ${stats_ref[status_text]}}"
+    result="${result//\{server\}/${stats_ref[ip]}}"
+    result="${result//\{port\}/${stats_ref[port]}}"
+    result="${result//\{uptime\}/${stats_ref[uptime]}}"
+    result="${result//\{connections\}/${stats_ref[connections]}}"
+    result="${result//\{cpu\}/${stats_ref[cpu]}}"
+    result="${result//\{ram\}/${stats_ref[mem]}}"
+    result="${result//\{ram_mb\}/${stats_ref[rss_mb]}}"
+    result="${result//\{update_time\}/${stats_ref[update_time]}}"
+    
+    echo "$result"
+}
+
+tg_project_status() {
+    local -A stats
+    while IFS='=' read -r key value; do
+        stats["$key"]="$value"
+    done < <(get_proxy_stats)
+    
+    local template=$(load_custom_message)
+    format_custom_message "$template" stats
+}
+
+tg_project_full_report() {
+    tg_project_status  # Используем то же сообщение для полного отчета
+}
+
+mtproto_tg_build_msg() {
+    local mode="$1"
+    tg_project_status
+}
+
+# Меню настройки кастомного сообщения
+edit_custom_message() {
+    clear_screen
+    echo ""
+    echo -e " ${BOLD}✏️  РЕДАКТИРОВАНИЕ СООБЩЕНИЯ${NC}"
+    echo " ─────────────────────────────────────────────"
+    echo ""
+    echo -e " ${YELLOW}Доступные переменные:${NC}"
+    echo " {status}     - статус прокси (✅ РАБОТАЕТ / ❌ ОСТАНОВЛЕН)"
+    echo " {server}     - IP сервера"
+    echo " {port}       - порт прокси"
+    echo " {uptime}     - время работы"
+    echo " {connections} - количество соединений"
+    echo " {cpu}        - загрузка CPU (%)"
+    echo " {ram}        - загрузка RAM (%)"
+    echo " {ram_mb}     - использование RAM (MB)"
+    echo " {update_time} - время обновления"
+    echo ""
+    echo -e " ${YELLOW}Текущее сообщение:${NC}"
+    echo " ─────────────────────────────────────────────"
+    cat "$TG_CUSTOM_MSG_FILE"
+    echo ""
+    echo " ─────────────────────────────────────────────"
+    echo ""
+    echo " Введи новое сообщение (пустая строка - завершить):"
+    echo ""
+    
+    local new_message=""
+    while IFS= read -r line; do
+        [ -z "$line" ] && break
+        new_message+="$line"$'\n'
+    done
+    
+    if [ -n "$new_message" ]; then
+        save_custom_message "$new_message"
+        success "Сообщение сохранено!"
+        
+        # Отправляем тест
+        if [ -n "$TG_BOT_TOKEN" ] && [ ${#TG_CHAT_IDS[@]} -gt 0 ]; then
+            echo ""
+            info "Отправляю тестовое сообщение..."
+            local msg=$(tg_project_status)
+            for cid in "${TG_CHAT_IDS[@]}"; do
+                tg_send "$cid" "$msg"
+            done
+        fi
+    fi
+    
+    read -rp " Enter для продолжения... "
+}
+
+manager_tg_settings() {
+    if [ ! -f "/opt/tg-core/tg-core.sh" ]; then
+        clear_screen
+        echo ""
+        echo -e " ${BOLD}🤖 TELEGRAM ИНТЕГРАЦИЯ${NC}"
+        echo ""
+        warning "tg-core.sh не установлен"
+        echo ""
+        echo " Для работы Telegram уведомлений нужно установить ядро tg-core."
+        echo ""
+        read -rp " Установить сейчас? (y/n): " install_tg
+        if [[ "$install_tg" =~ ^[Yy]$ ]]; then
+            info "Скачиваем tg-core.sh..."
+            mkdir -p /opt/tg-core
+            local dl_ok=0
+            if curl -fsSL --max-time 15 \
+                "https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/main/tg-core.sh" \
+                -o /opt/tg-core/tg-core.sh 2>/dev/null && [ -s /opt/tg-core/tg-core.sh ]; then
+                dl_ok=1
+            fi
+            if [ $dl_ok -eq 0 ]; then
+                warning "Не удалось скачать. Помести tg-core.sh вручную в /opt/tg-core/"
+                read -rp " Enter... "; return
+            fi
+            chmod +x /opt/tg-core/tg-core.sh
+            success "tg-core.sh установлен"
+        else
+            return
+        fi
+    fi
+
+    if ! _tg_core_load; then
+        warning "Не удалось загрузить tg-core.sh (возможно, повреждён)"
+        read -rp " Enter... "
+        return
+    fi
+
+    tg_load_config
+    
+    # Расширенное меню Telegram
+    while true; do
+        clear_screen
+        echo ""
+        echo -e " ${BOLD}🤖 TELEGRAM УВЕДОМЛЕНИЯ${NC}"
+        echo " ─────────────────────────────────────────────"
+        
+        if tg_service_status; then
+            echo -e " Сервис:   ${GREEN}✅ РАБОТАЕТ${NC}"
+        else
+            echo -e " Сервис:   ${YELLOW}⏹  ОСТАНОВЛЕН${NC}"
+        fi
+        
+        if [ -n "$TG_BOT_TOKEN" ]; then
+            echo -e " Токен:    ${GREEN}✓ задан${NC} (${TG_BOT_TOKEN:0:12}...)"
+        else
+            echo -e " Токен:    ${RED}✗ не задан${NC}"
+        fi
+        
+        echo -e " Интервал: ${CYAN}${TG_INTERVAL}с${NC}"
+        echo ""
+        echo " 1) 🔑 Задать токен"
+        echo " 2) ➕ Добавить чат"
+        echo " 3) ✏️  Редактировать сообщение"
+        echo " 4) 📤 Тест отправки"
+        echo " 5) ⏱  Интервал обновления"
+        echo " 6) ▶️  Запустить сервис"
+        echo " 7) ⏹  Остановить сервис"
+        echo " 8) 🗑  Удалить всё"
+        echo " 0) ← Назад"
+        echo ""
+        read -rp " Выбери: " tg_choice
+        
+        case $tg_choice in
+            1) _tg_setup_token ;;
+            2) _tg_setup_add_chat ;;
+            3) edit_custom_message ;;
+            4) 
+                if [ -n "$TG_BOT_TOKEN" ] && [ ${#TG_CHAT_IDS[@]} -gt 0 ]; then
+                    local msg=$(tg_project_status)
+                    for cid in "${TG_CHAT_IDS[@]}"; do
+                        tg_send "$cid" "$msg"
+                    done
+                    success "Тест отправлен!"
+                else
+                    warning "Сначала настрой токен и чаты"
+                fi
+                read -rp " Enter... "
+                ;;
+            5) _tg_setup_interval ;;
+            6) tg_install_service; success "Сервис запущен"; read -rp " Enter... " ;;
+            7) tg_remove_service; success "Сервис остановлен"; read -rp " Enter... " ;;
+            8)
+                read -rp "⚠️  Удалить всё? (yes/no): " c
+                if [ "$c" = "yes" ]; then
+                    tg_remove_service
+                    rm -rf "$TG_CORE_MSGIDS"
+                    rm -f "$TG_CUSTOM_MSG_FILE"
+                    TG_BOT_TOKEN=""; TG_CHAT_IDS=(); TG_CHAT_MODES=()
+                    TG_CHAT_NAMES=(); TG_INTERVAL=60
+                    tg_save_config
+                    success "Удалено"
+                fi
+                read -rp " Enter... "
+                ;;
+            0) return 0 ;;
+        esac
+    done
+}
+
+# ============ ФУНКЦИИ МЕНЕДЖЕРА ============
+
+manager_show_qr() {
+    clear_screen
+    echo ""
+    if [ ! -f "$SERVICE_FILE" ]; then
+        warning "MTProto не установлен!"
+        read -rp " Enter... "; return
+    fi
+
+    local server_ip proxy_port secret proxy_link
+    server_ip=$(hostname -I | awk '{print $1}')
+    proxy_port=$(grep -oP '(?<=-H )\d+' "$SERVICE_FILE" || echo "8080")
+    secret=$(grep -oP '(?<=-S )\S+' "$SERVICE_FILE" || echo "")
+
+    if grep -q -- "-P " "$SERVICE_FILE"; then
+        local tag
+        tag=$(grep -oP '(?<=-P )\S+' "$SERVICE_FILE" || echo "")
+        proxy_link="tg://proxy?server=${server_ip}&port=${proxy_port}&secret=${secret}&t=${tag}"
+    else
+        proxy_link="tg://proxy?server=${server_ip}&port=${proxy_port}&secret=${secret}"
+    fi
+
+    echo -e " ${YELLOW}${BOLD}📱 QR-КОД:${NC}"
+    generate_qr_code "$proxy_link"
+    echo ""
+    echo -e " ${YELLOW}${BOLD}🔗 ССЫЛКА:${NC}"
+    echo -e " ${GREEN}${BOLD}$proxy_link${NC}"
+    echo ""
+    echo -e " ${YELLOW}${BOLD}📋 Данные для @MTProxybot:${NC}"
+    echo -e " ┌─────────────────────────────────────────┐"
+    echo -e " │ Host:Port  ${CYAN}${server_ip}:${proxy_port}${NC}"
+    echo -e " │ Секрет     ${CYAN}${secret}${NC}"
+    echo -e " └─────────────────────────────────────────┘"
+    echo ""
+    read -rp " Enter для возврата... "
+}
+
+manager_start() {
+    clear_screen; echo ""
+    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
+    systemctl start mtproto-proxy > /dev/null 2>&1; sleep 2
+    systemctl is-active --quiet mtproto-proxy && success "Запущен!" || err "Ошибка запуска!"
+    read -rp " Enter для возврата... "
+}
+
+manager_stop() {
+    clear_screen; echo ""
+    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
+    systemctl stop mtproto-proxy > /dev/null 2>&1; sleep 2
+    ! systemctl is-active --quiet mtproto-proxy && success "Остановлен!" || warning "Не удалось остановить"
+    read -rp " Enter для возврата... "
+}
+
+manager_restart() {
+    clear_screen; echo ""
+    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
+    systemctl restart mtproto-proxy > /dev/null 2>&1; sleep 2
+    systemctl is-active --quiet mtproto-proxy && success "Перезагружен!" || err "Ошибка перезагрузки!"
+    read -rp " Enter для возврата... "
+}
+
+manager_apply_tag() {
+    clear_screen; echo ""
+    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
+    local SPONSOR_TAG
+    read -rp " Введи спонсорский тег: " SPONSOR_TAG
+    [ -z "$SPONSOR_TAG" ] && { warning "Тег не введён"; read -rp " Enter... "; return; }
+
+    if grep -q -- "-P " "$SERVICE_FILE"; then
+        sed -i "s|-P [^ ]*|-P $SPONSOR_TAG|" "$SERVICE_FILE"
+    else
+        sed -i "s|-M 1$|-M 1 -P $SPONSOR_TAG|" "$SERVICE_FILE"
+    fi
+    systemctl daemon-reload > /dev/null 2>&1
+    systemctl restart mtproto-proxy > /dev/null 2>&1; sleep 2
+    success "Тег применён!"
+    read -rp " Enter для возврата... "
+}
+
+manager_remove_tag() {
+    clear_screen; echo ""
+    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
+    grep -q -- "-P " "$SERVICE_FILE" || { warning "Тег не установлен"; read -rp " Enter... "; return; }
+
+    read -rp " Удалить тег? (yes/no): " confirm
+    if [ "$confirm" = "yes" ]; then
+        sed -i "s| -P [^ ]*||" "$SERVICE_FILE"
+        systemctl daemon-reload > /dev/null 2>&1
+        systemctl restart mtproto-proxy > /dev/null 2>&1; sleep 2
+        success "Тег удалён!"
+    else
+        info "Отменено"
+    fi
+    read -rp " Enter для возврата... "
+}
+
+manager_change_port() {
+    clear_screen; echo ""
+    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
+
+    local current_port
+    current_port=$(grep -oP '(?<=-H )\d+' "$SERVICE_FILE")
+    echo -e " Текущий порт: ${CYAN}$current_port${NC}"
+    echo ""
+    echo " 1) 443"
+    echo " 2) 8080"
+    echo " 3) 8443"
+    echo " 4) Свой"
+    echo ""
+    read -rp "Выбор [1-4]: " PORT_CHOICE
+
+    local NEW_PORT
+    case $PORT_CHOICE in
+        1) NEW_PORT=443 ;;
+        2) NEW_PORT=8080 ;;
+        3) NEW_PORT=8443 ;;
+        4)
+            while :; do
+                read -rp "Порт: " NEW_PORT
+                validate_port "$NEW_PORT" && break
+            done
+            ;;
+        *) warning "Неверный выбор"; read -rp " Enter... "; return ;;
+    esac
+
+    if ! check_port_available "$NEW_PORT" "$current_port"; then
+        warning "Порт $NEW_PORT уже занят!"
+        read -rp " Enter... "
+        return
+    fi
+
+    sed -i "s|-H [0-9]*|-H $NEW_PORT|" "$SERVICE_FILE"
+    systemctl daemon-reload > /dev/null 2>&1
+    systemctl restart mtproto-proxy > /dev/null 2>&1; sleep 2
+    success "Порт изменён на $NEW_PORT!"
+    read -rp " Enter для возврата... "
+}
+
+manager_show_logs() {
+    clear_screen; echo ""
+    echo -e " ${BOLD}📝 ЛОГИ (последние 50 строк)${NC}"
+    echo " ─────────────────────────────────────────────"
+    journalctl -u mtproto-proxy -n 50 --no-pager 2>/dev/null || echo " Логи недоступны"
+    echo ""
+    read -rp " Enter для возврата... "
+}
+
+uninstall_mtproxy_silent() {
+    systemctl stop mtproto-proxy 2>/dev/null || true
+    systemctl disable mtproto-proxy 2>/dev/null || true
+    rm -rf "$INSTALL_DIR"
+    rm -f "$SERVICE_FILE"
+    systemctl daemon-reload > /dev/null 2>&1
 }
 
 # ============ УСТАНОВЩИК MTPROTO ============
@@ -350,7 +870,7 @@ run_installer() {
 
     (
         apt update -y > "$LOGFILE" 2>&1
-        apt install -y git curl build-essential libssl-dev zlib1g-dev xxd netcat-openbsd >> "$LOGFILE" 2>&1
+        apt install -y git curl build-essential libssl-dev zlib1g-dev xxd netcat-openbsd bc >> "$LOGFILE" 2>&1
     ) &
     spinner $! "Устанавливаем зависимости..."
 
@@ -528,25 +1048,26 @@ show_manager_menu() {
     fi
 
     echo ""
-    echo -e " ${CYAN}${BOLD}═════════════════════════════════════════════${NC}"
+    echo -e " ${CYAN}${BOLD}════════════════════════════════════════════════════╗${NC}"
     echo ""
     echo -e " ${BOLD}📱 УПРАВЛЕНИЕ:${NC}"
     echo ""
-    echo " 1)  📈 Мониторинг ресурсов (live)"
-    echo " 2)  📱 QR-код и ссылка"
-    echo " 3)  ▶️  Запустить"
-    echo " 4)  ⏸️  Остановить"
-    echo " 5)  🔄 Перезагрузить"
-    echo " 6)  🏷️  Применить спонсорский тег"
-    echo " 7)  ❌ Удалить спонсорский тег"
-    echo " 8)  🔧 Изменить порт"
-    echo " 9)  📝 Логи (50 строк)"
-    echo " 10) 🗑️  Удалить MTProto"
-    echo " 11) 🤖 Telegram уведомления"
+    echo "  1)  📈 Мониторинг ресурсов (live)"
+    echo "  2)  📱 QR-код и ссылка"
+    echo "  3)  ▶️  Запустить"
+    echo "  4)  ⏸️  Остановить"
+    echo "  5)  🔄 Перезагрузить"
+    echo "  6)  🏷️  Применить спонсорский тег"
+    echo "  7)  ❌ Удалить спонсорский тег"
+    echo "  8)  🔧 Изменить порт"
+    echo "  9)  📝 Логи (50 строк)"
+    echo " 10)  🗑️  Удалить MTProto"
+    echo " 11)  🤖 Telegram уведомления"
+    echo " 12)  🌍 Сменить часовой пояс"
     echo ""
-    echo " 0)  🚪 Выход"
+    echo "  0)  🚪 Выход"
     echo ""
-    echo -e " ${CYAN}${BOLD}═════════════════════════════════════════════${NC}"
+    echo -e " ${CYAN}${BOLD}════════════════════════════════════════════════════╝${NC}"
     echo ""
     read -rp " Выбери опцию: " choice
 
@@ -569,6 +1090,7 @@ show_manager_menu() {
             fi
             ;;
         11) manager_tg_settings ;;
+        12) change_timezone ;;
         0)
             echo -e "${GREEN}До свидания! 👋${NC}"
             exit 0
@@ -578,268 +1100,6 @@ show_manager_menu() {
             sleep 1
             ;;
     esac
-}
-
-# ============ ФУНКЦИИ МЕНЕДЖЕРА ============
-
-manager_show_qr() {
-    clear_screen
-    echo ""
-    if [ ! -f "$SERVICE_FILE" ]; then
-        warning "MTProto не установлен!"
-        read -rp " Enter... "; return
-    fi
-
-    local server_ip proxy_port secret proxy_link
-    server_ip=$(hostname -I | awk '{print $1}')
-    proxy_port=$(grep -oP '(?<=-H )\d+' "$SERVICE_FILE" || echo "8080")
-    secret=$(grep -oP '(?<=-S )\S+' "$SERVICE_FILE" || echo "")
-
-    if grep -q -- "-P " "$SERVICE_FILE"; then
-        local tag
-        tag=$(grep -oP '(?<=-P )\S+' "$SERVICE_FILE" || echo "")
-        proxy_link="tg://proxy?server=${server_ip}&port=${proxy_port}&secret=${secret}&t=${tag}"
-    else
-        proxy_link="tg://proxy?server=${server_ip}&port=${proxy_port}&secret=${secret}"
-    fi
-
-    echo -e " ${YELLOW}${BOLD}📱 QR-КОД:${NC}"
-    generate_qr_code "$proxy_link"
-    echo ""
-    echo -e " ${YELLOW}${BOLD}🔗 ССЫЛКА:${NC}"
-    echo -e " ${GREEN}${BOLD}$proxy_link${NC}"
-    echo ""
-    echo -e " ${YELLOW}${BOLD}📋 Данные для @MTProxybot:${NC}"
-    echo -e " ┌─────────────────────────────────────────┐"
-    echo -e " │ Host:Port  ${CYAN}${server_ip}:${proxy_port}${NC}"
-    echo -e " │ Секрет     ${CYAN}${secret}${NC}"
-    echo -e " └─────────────────────────────────────────┘"
-    echo ""
-    read -rp " Enter для возврата... "
-}
-
-manager_start() {
-    clear_screen; echo ""
-    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
-    systemctl start mtproto-proxy > /dev/null 2>&1; sleep 2
-    systemctl is-active --quiet mtproto-proxy && success "Запущен!" || err "Ошибка запуска!"
-    read -rp " Enter для возврата... "
-}
-
-manager_stop() {
-    clear_screen; echo ""
-    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
-    systemctl stop mtproto-proxy > /dev/null 2>&1; sleep 2
-    ! systemctl is-active --quiet mtproto-proxy && success "Остановлен!" || warning "Не удалось остановить"
-    read -rp " Enter для возврата... "
-}
-
-manager_restart() {
-    clear_screen; echo ""
-    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
-    systemctl restart mtproto-proxy > /dev/null 2>&1; sleep 2
-    systemctl is-active --quiet mtproto-proxy && success "Перезагружен!" || err "Ошибка перезагрузки!"
-    read -rp " Enter для возврата... "
-}
-
-manager_apply_tag() {
-    clear_screen; echo ""
-    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
-    local SPONSOR_TAG
-    read -rp " Введи спонсорский тег: " SPONSOR_TAG
-    [ -z "$SPONSOR_TAG" ] && { warning "Тег не введён"; read -rp " Enter... "; return; }
-
-    if grep -q -- "-P " "$SERVICE_FILE"; then
-        sed -i "s|-P [^ ]*|-P $SPONSOR_TAG|" "$SERVICE_FILE"
-    else
-        sed -i "s|-M 1$|-M 1 -P $SPONSOR_TAG|" "$SERVICE_FILE"
-    fi
-    systemctl daemon-reload > /dev/null 2>&1
-    systemctl restart mtproto-proxy > /dev/null 2>&1; sleep 2
-    success "Тег применён!"
-    read -rp " Enter для возврата... "
-}
-
-manager_remove_tag() {
-    clear_screen; echo ""
-    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
-    grep -q -- "-P " "$SERVICE_FILE" || { warning "Тег не установлен"; read -rp " Enter... "; return; }
-
-    read -rp " Удалить тег? (yes/no): " confirm
-    if [ "$confirm" = "yes" ]; then
-        sed -i "s| -P [^ ]*||" "$SERVICE_FILE"
-        systemctl daemon-reload > /dev/null 2>&1
-        systemctl restart mtproto-proxy > /dev/null 2>&1; sleep 2
-        success "Тег удалён!"
-    else
-        info "Отменено"
-    fi
-    read -rp " Enter для возврата... "
-}
-
-manager_change_port() {
-    clear_screen; echo ""
-    [ ! -f "$SERVICE_FILE" ] && { warning "MTProto не установлен!"; read -rp " Enter... "; return; }
-
-    local current_port
-    current_port=$(grep -oP '(?<=-H )\d+' "$SERVICE_FILE")
-    echo -e " Текущий порт: ${CYAN}$current_port${NC}"
-    echo ""
-    echo " 1) 443"
-    echo " 2) 8080"
-    echo " 3) 8443"
-    echo " 4) Свой"
-    echo ""
-    read -rp "Выбор [1-4]: " PORT_CHOICE
-
-    local NEW_PORT
-    case $PORT_CHOICE in
-        1) NEW_PORT=443 ;;
-        2) NEW_PORT=8080 ;;
-        3) NEW_PORT=8443 ;;
-        4)
-            while :; do
-                read -rp "Порт: " NEW_PORT
-                validate_port "$NEW_PORT" && break
-            done
-            ;;
-        *) warning "Неверный выбор"; read -rp " Enter... "; return ;;
-    esac
-
-    if ! check_port_available "$NEW_PORT" "$current_port"; then
-        warning "Порт $NEW_PORT уже занят!"
-        read -rp " Enter... "
-        return
-    fi
-
-    sed -i "s|-H [0-9]*|-H $NEW_PORT|" "$SERVICE_FILE"
-    systemctl daemon-reload > /dev/null 2>&1
-    systemctl restart mtproto-proxy > /dev/null 2>&1; sleep 2
-    success "Порт изменён на $NEW_PORT!"
-    read -rp " Enter для возврата... "
-}
-
-manager_show_logs() {
-    clear_screen; echo ""
-    echo -e " ${BOLD}📝 ЛОГИ (последние 50 строк)${NC}"
-    echo " ─────────────────────────────────────────────"
-    journalctl -u mtproto-proxy -n 50 --no-pager 2>/dev/null || echo " Логи недоступны"
-    echo ""
-    read -rp " Enter для возврата... "
-}
-
-uninstall_mtproxy_silent() {
-    systemctl stop mtproto-proxy 2>/dev/null || true
-    systemctl disable mtproto-proxy 2>/dev/null || true
-    rm -rf "$INSTALL_DIR"
-    rm -f "$SERVICE_FILE"
-    systemctl daemon-reload > /dev/null 2>&1
-}
-
-# ============ TELEGRAM ИНТЕГРАЦИЯ ============
-TG_PROJECT_NAME="MTProto Proxy"
-TG_BUILD_MSG_FN="mtproto_tg_build_msg"
-
-_TG_CORE_LOADED=0
-
-_tg_core_load() {
-    [ "$_TG_CORE_LOADED" = "1" ] && return 0
-    if [ ! -f "/opt/tg-core/tg-core.sh" ]; then
-        return 1
-    fi
-    source /opt/tg-core/tg-core.sh
-    local rc=$?
-    if [ $rc -eq 0 ] && type tg_daemon_loop &>/dev/null; then
-        _TG_CORE_LOADED=1
-        return 0
-    else
-        return 1
-    fi
-}
-
-tg_project_status() {
-    local server_ip proxy_port
-    server_ip=$(hostname -I | awk '{print $1}')
-    proxy_port=$(grep -oP '(?<=-H )\d+' "$SERVICE_FILE" 2>/dev/null || echo "N/A")
-
-    if systemctl is-active --quiet mtproto-proxy 2>/dev/null; then
-        printf "🔘 Статус: <b>✅ Работает</b>\n🖥 Сервер: <code>%s:%s</code>" \
-            "$server_ip" "$proxy_port"
-    else
-        printf "🔘 Статус: <b>❌ Остановлен</b>\n🖥 Сервер: <code>%s:%s</code>" \
-            "$server_ip" "$proxy_port"
-    fi
-}
-
-tg_project_full_report() {
-    local -A stats
-    while IFS='=' read -r key value; do
-        stats["$key"]="$value"
-    done < <(get_proxy_stats)
-
-    if [ "${stats[status]}" = "active" ]; then
-        svc="✅ Работает"
-    else
-        svc="❌ Остановлен"
-        printf "📡 <b>MTProto Proxy — Статистика</b>\n\n🔘 Статус: <b>%s</b>\n🖥 Сервер: <code>%s:%s</code>\n\n🕐 <i>%s</i>" \
-            "$svc" "${stats[ip]}" "${stats[port]}" "$(date '+%d.%m.%Y %H:%M:%S')"
-        return
-    fi
-
-    printf "📡 <b>MTProto Proxy — Статистика</b>\n\n🔘 Статус:    <b>%s</b>\n🖥 Сервер:    <code>%s:%s</code>\n⏱ Аптайм:    <code>%s</code>\n👥 Соединений: <b>%s</b>\n\n📊 <b>Ресурсы:</b>\n  CPU: <code>%s%%</code>\n  RAM: <code>%s%%</code> (%s MB)\n\n🕐 <i>%s</i>" \
-        "$svc" "${stats[ip]}" "${stats[port]}" "${stats[uptime]}" "${stats[connections]}" \
-        "${stats[cpu]}" "${stats[mem]}" "${stats[rss_mb]}" "$(date '+%d.%m.%Y %H:%M:%S')"
-}
-
-mtproto_tg_build_msg() {
-    local mode="$1"
-    if [ "$mode" = "full" ]; then
-        tg_project_full_report
-    else
-        printf "📡 <b>MTProto Proxy</b>\n%s\n🕐 <i>%s</i>" \
-            "$(tg_project_status)" "$(date '+%d.%m.%Y %H:%M:%S')"
-    fi
-}
-
-manager_tg_settings() {
-    if [ ! -f "/opt/tg-core/tg-core.sh" ]; then
-        clear_screen
-        echo ""
-        echo -e " ${BOLD}🤖 TELEGRAM ИНТЕГРАЦИЯ${NC}"
-        echo ""
-        warning "tg-core.sh не установлен"
-        echo ""
-        echo " Для работы Telegram уведомлений нужно установить ядро tg-core."
-        echo ""
-        read -rp " Установить сейчас? (y/n): " install_tg
-        if [[ "$install_tg" =~ ^[Yy]$ ]]; then
-            info "Скачиваем tg-core.sh..."
-            mkdir -p /opt/tg-core
-            local dl_ok=0
-            if curl -fsSL --max-time 15 \
-                "https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/main/tg-core.sh" \
-                -o /opt/tg-core/tg-core.sh 2>/dev/null && [ -s /opt/tg-core/tg-core.sh ]; then
-                dl_ok=1
-            fi
-            if [ $dl_ok -eq 0 ]; then
-                warning "Не удалось скачать. Помести tg-core.sh вручную в /opt/tg-core/"
-                read -rp " Enter... "; return
-            fi
-            chmod +x /opt/tg-core/tg-core.sh
-            success "tg-core.sh установлен"
-        else
-            return
-        fi
-    fi
-
-    if ! _tg_core_load; then
-        warning "Не удалось загрузить tg-core.sh (возможно, повреждён)"
-        read -rp " Enter... "
-        return
-    fi
-
-    tg_load_config
-    tg_setup_interactive
 }
 
 # ============ УСТАНОВКА КОМАНДЫ ============
