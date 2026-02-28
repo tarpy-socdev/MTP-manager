@@ -1,15 +1,15 @@
 #!/bin/bash
 # ==============================================
-# MTProto Proxy — Universal Manager v4.5
+# MTProto Proxy — Universal Manager v4.6
 # Установка + Менеджер
 # github.com/tarpy-socdev/MTP-manager
 # ==============================================
-# CHANGELOG v4.5:
-# - Исправлен live мониторинг (реальное обновление CPU/RAM)
-# - Добавлена смена часового пояса по городам
-# - Кастомные сообщения для Telegram
-# - Выровнены символы в меню
-# - Улучшена точность сбора статистики
+# CHANGELOG v4.6:
+# - ИСПРАВЛЕНО: загрузка ядра Telegram (tg_send больше не "command not found")
+# - ИСПРАВЛЕНО: аптайм теперь точный (через /proc)
+# - ИСПРАВЛЕНО: скачки времени в мониторинге (убраны лишние sleep)
+# - УЛУЧШЕНО: соединения разделены на входящие/исходящие
+# - УЛУЧШЕНО: CPU и RAM показываются как целые числа (быстрее)
 # ==============================================
 
 # ============ ЦВЕТА И СТИЛИ ============
@@ -51,7 +51,7 @@ clear_screen() {
     clear
     echo -e "${CYAN}${BOLD}"
     echo " ╔═══════════════════════════════════════════════╗"
-    echo " ║      MTProto Proxy Manager v4.5               ║"
+    echo " ║      MTProto Proxy Manager v4.6               ║"
     echo " ║      github.com/tarpy-socdev/MTP-manager      ║"
     echo " ╚═══════════════════════════════════════════════╝"
     echo -e "${NC}"
@@ -126,6 +126,8 @@ get_installation_status() {
         echo 2
     fi
 }
+
+[[ $EUID -ne 0 ]] && err "Запускай от root! (sudo bash script.sh)"
 
 # ============ ЧАСОВОЙ ПОЯС ============
 TIMEZONE_DIR="/usr/share/zoneinfo"
@@ -211,7 +213,7 @@ change_timezone() {
     read -rp " Enter для продолжения... "
 }
 
-# ============ СБОР СТАТИСТИКИ ПРОКСИ (УЛУЧШЕННЫЙ) ============
+# ============ СБОР СТАТИСТИКИ ПРОКСИ (УЛУЧШЕННЫЙ v4.6) ============
 get_proxy_stats() {
     local -A stats
     local proxy_port server_ip pid
@@ -237,12 +239,8 @@ get_proxy_stats() {
     if [ -n "$pid" ] && [ "$pid" != "0" ] && kill -0 "$pid" 2>/dev/null; then
         stats[pid]="$pid"
         
-        # Более точный сбор CPU (среднее за 1 секунду)
-        local cpu_sample1 cpu_sample2
-        cpu_sample1=$(ps -p "$pid" -o %cpu= 2>/dev/null | xargs || echo "0")
-        sleep 0.5
-        cpu_sample2=$(ps -p "$pid" -o %cpu= 2>/dev/null | xargs || echo "0")
-        stats[cpu]=$(echo "scale=1; ($cpu_sample1 + $cpu_sample2) / 2" | bc 2>/dev/null || echo "0.0")
+        # Быстрый сбор CPU (одно измерение, без sleep)
+        stats[cpu]=$(ps -p "$pid" -o %cpu= 2>/dev/null | xargs | cut -d. -f1 || echo "0")
         
         # RAM в MB и процентах
         local mem_total_kb mem_used_kb
@@ -251,20 +249,23 @@ get_proxy_stats() {
         
         if [ -n "$mem_total_kb" ] && [ "$mem_total_kb" -gt 0 ]; then
             stats[rss_mb]=$(( mem_used_kb / 1024 ))
-            stats[mem]=$(echo "scale=1; ($mem_used_kb * 100) / $mem_total_kb" | bc 2>/dev/null || echo "0.0")
+            stats[mem]=$(( (mem_used_kb * 100) / mem_total_kb ))
         else
             stats[rss_mb]="0"
-            stats[mem]="0.0"
+            stats[mem]="0"
         fi
 
-        # Аптайм процесса
-        local start_time now_time uptime_seconds
-        start_time=$(ps -p "$pid" -o lstart= 2>/dev/null)
-        if [ -n "$start_time" ]; then
-            now_time=$(date +%s)
-            start_epoch=$(date -d "$start_time" +%s 2>/dev/null || echo 0)
-            if [ "$start_epoch" -gt 0 ]; then
-                uptime_seconds=$(( now_time - start_epoch ))
+        # Аптайм через /proc/[pid]/stat (надежнее)
+        if [ -f "/proc/$pid/stat" ]; then
+            local start_ticks uptime_seconds
+            start_ticks=$(cut -d' ' -f22 /proc/$pid/stat 2>/dev/null || echo "0")
+            local system_uptime=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo "0")
+            if [ "$start_ticks" -gt 0 ] && [ "$system_uptime" -gt 0 ]; then
+                # Конвертируем тики в секунды (обычно 100 тиков = 1 секунда)
+                uptime_seconds=$(( system_uptime - (start_ticks / 100) ))
+                if [ $uptime_seconds -lt 0 ]; then
+                    uptime_seconds=0
+                fi
                 local days=$(( uptime_seconds / 86400 ))
                 local hours=$(( (uptime_seconds % 86400) / 3600 ))
                 local mins=$(( (uptime_seconds % 3600) / 60 ))
@@ -272,41 +273,49 @@ get_proxy_stats() {
                 
                 if [ $days -gt 0 ]; then
                     stats[uptime]="${days}д ${hours}ч ${mins}м"
+                elif [ $hours -gt 0 ]; then
+                    stats[uptime]="${hours}ч ${mins}м ${secs}с"
                 else
-                    stats[uptime]=$(printf "%02d:%02d:%02d" $hours $mins $secs)
+                    stats[uptime]="${mins}м ${secs}с"
                 fi
             else
-                stats[uptime]="N/A"
+                stats[uptime]="только что"
             fi
         else
             stats[uptime]="N/A"
         fi
 
-        # Подсчёт соединений (более точный)
+        # Счетчики соединений (разделяем входящие/исходящие)
         if command -v ss &>/dev/null; then
-            stats[connections]=$(ss -tn state established "( dport = :$proxy_port )" 2>/dev/null | tail -n +2 | wc -l || echo "0")
-            # Добавляем входящие соединения
-            local inbound
-            inbound=$(ss -tn state established "( sport = :$proxy_port )" 2>/dev/null | tail -n +2 | wc -l || echo "0")
-            stats[connections]=$(( ${stats[connections]} + inbound ))
+            local established_in established_out
+            established_in=$(ss -tn state established "( sport = :$proxy_port )" 2>/dev/null | tail -n +2 | wc -l || echo "0")
+            established_out=$(ss -tn state established "( dport = :$proxy_port )" 2>/dev/null | tail -n +2 | wc -l || echo "0")
+            stats[conn_in]="$established_in"
+            stats[conn_out]="$established_out"
+            stats[conn_total]=$(( established_in + established_out ))
         else
-            stats[connections]=$(netstat -tn 2>/dev/null | grep -c ":${proxy_port}[[:space:]]" || echo "0")
+            local total
+            total=$(netstat -tn 2>/dev/null | grep -c ":${proxy_port}[[:space:]]" || echo "0")
+            stats[conn_in]="?"
+            stats[conn_out]="?"
+            stats[conn_total]="$total"
         fi
     else
         stats[pid]=""
-        stats[cpu]="0.0"
-        stats[mem]="0.0"
+        stats[cpu]="0"
+        stats[mem]="0"
         stats[rss_mb]="0"
         stats[uptime]="—"
-        stats[connections]="0"
+        stats[conn_in]="0"
+        stats[conn_out]="0"
+        stats[conn_total]="0"
     fi
 
     for key in "${!stats[@]}"; do
         echo "$key=${stats[$key]}"
     done
 }
-
-# ============ МОНИТОРИНГ РЕСУРСОВ (ИСПРАВЛЕННЫЙ) ============
+# ============ МОНИТОРИНГ РЕСУРСОВ (ИСПРАВЛЕННЫЙ v4.6) ============
 show_resource_live() {
     if [ ! -f "$SERVICE_FILE" ]; then
         warning "MTProto не установлен!"
@@ -333,8 +342,8 @@ show_resource_live() {
         local cpu_bar="" mem_bar=""
         local cpu_int mem_int
         
-        cpu_int=$(printf "%.0f" "${stats[cpu]}" 2>/dev/null || echo 0)
-        mem_int=$(printf "%.0f" "${stats[mem]}" 2>/dev/null || echo 0)
+        cpu_int=${stats[cpu]:-0}
+        mem_int=${stats[mem]:-0}
         
         local cpu_bars=$(( cpu_int / 5 ))
         [ $cpu_bars -gt 20 ] && cpu_bars=20
@@ -355,7 +364,7 @@ show_resource_live() {
 
         tput cup 0 0
 
-        # Верхняя рамка (фиксированной ширины)
+        # Верхняя рамка
         echo -e "${CYAN}${BOLD}"
         echo " ╔══════════════════════════════════════════════════════════╗"
         printf " ║      MTProto Proxy — Live Monitor                        ║\n"
@@ -368,10 +377,16 @@ show_resource_live() {
         echo -e " Сервер:      ${CYAN}${stats[ip]}:${stats[port]}${NC}"
         echo -e " Обновлено:   ${CYAN}${stats[update_time]}${NC}"
         echo -e " Аптайм:      ${CYAN}${stats[uptime]}${NC}"
-        echo -e " Соединений:  ${CYAN}${stats[connections]}${NC}"
+        
+        # Соединения (красиво)
+        if [ "${stats[conn_in]}" != "?" ]; then
+            echo -e " Соединения:  ${CYAN}📥 ${stats[conn_in]} входящих | 📤 ${stats[conn_out]} исходящих | всего ${stats[conn_total]}${NC}"
+        else
+            echo -e " Соединения:  ${CYAN}${stats[conn_total]} активных${NC}"
+        fi
         echo ""
         
-        # Графики с точными значениями
+        # Графики
         printf " CPU: %s ${CYAN}%s%%${NC}\n" "$(echo -e "$cpu_bar")" "${stats[cpu]}"
         printf " RAM: %s ${CYAN}%s%%${NC} (%s MB)\n" "$(echo -e "$mem_bar")" "${stats[mem]}" "${stats[rss_mb]}"
         echo ""
@@ -389,7 +404,7 @@ show_resource_live() {
     trap - INT TERM
 }
 
-# ============ TELEGRAM ИНТЕГРАЦИЯ С КАСТОМНЫМИ СООБЩЕНИЯМИ ============
+# ============ TELEGRAM ИНТЕГРАЦИЯ (ИСПРАВЛЕННАЯ v4.6) ============
 TG_PROJECT_NAME="MTProto Proxy"
 TG_BUILD_MSG_FN="mtproto_tg_build_msg"
 
@@ -422,7 +437,7 @@ load_custom_message() {
 🔘 Статус: {status}
 🖥 Сервер: {server}:{port}
 ⏱ Аптайм: {uptime}
-👥 Соединений: {connections}
+👥 Соединения: 📥 {conn_in} входящих | 📤 {conn_out} исходящих
 
 📊 Ресурсы:
   CPU: {cpu}%
@@ -450,7 +465,9 @@ format_custom_message() {
     result="${result//\{server\}/${stats_ref[ip]}}"
     result="${result//\{port\}/${stats_ref[port]}}"
     result="${result//\{uptime\}/${stats_ref[uptime]}}"
-    result="${result//\{connections\}/${stats_ref[connections]}}"
+    result="${result//\{conn_in\}/${stats_ref[conn_in]}}"
+    result="${result//\{conn_out\}/${stats_ref[conn_out]}}"
+    result="${result//\{conn_total\}/${stats_ref[conn_total]}}"
     result="${result//\{cpu\}/${stats_ref[cpu]}}"
     result="${result//\{ram\}/${stats_ref[mem]}}"
     result="${result//\{ram_mb\}/${stats_ref[rss_mb]}}"
@@ -470,7 +487,7 @@ tg_project_status() {
 }
 
 tg_project_full_report() {
-    tg_project_status  # Используем то же сообщение для полного отчета
+    tg_project_status
 }
 
 mtproto_tg_build_msg() {
@@ -490,7 +507,9 @@ edit_custom_message() {
     echo " {server}     - IP сервера"
     echo " {port}       - порт прокси"
     echo " {uptime}     - время работы"
-    echo " {connections} - количество соединений"
+    echo " {conn_in}    - входящие соединения"
+    echo " {conn_out}   - исходящие соединения"
+    echo " {conn_total} - всего соединений"
     echo " {cpu}        - загрузка CPU (%)"
     echo " {ram}        - загрузка RAM (%)"
     echo " {ram_mb}     - использование RAM (MB)"
@@ -515,8 +534,8 @@ edit_custom_message() {
         save_custom_message "$new_message"
         success "Сообщение сохранено!"
         
-        # Отправляем тест
-        if [ -n "$TG_BOT_TOKEN" ] && [ ${#TG_CHAT_IDS[@]} -gt 0 ]; then
+        # Отправляем тест, если ядро загружено
+        if [ "$_TG_CORE_LOADED" = "1" ] && [ -n "$TG_BOT_TOKEN" ] && [ ${#TG_CHAT_IDS[@]} -gt 0 ]; then
             echo ""
             info "Отправляю тестовое сообщение..."
             local msg=$(tg_project_status)
@@ -530,6 +549,7 @@ edit_custom_message() {
 }
 
 manager_tg_settings() {
+    # Сначала проверяем наличие файла ядра
     if [ ! -f "/opt/tg-core/tg-core.sh" ]; then
         clear_screen
         echo ""
@@ -543,29 +563,29 @@ manager_tg_settings() {
         if [[ "$install_tg" =~ ^[Yy]$ ]]; then
             info "Скачиваем tg-core.sh..."
             mkdir -p /opt/tg-core
-            local dl_ok=0
             if curl -fsSL --max-time 15 \
                 "https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/main/tg-core.sh" \
                 -o /opt/tg-core/tg-core.sh 2>/dev/null && [ -s /opt/tg-core/tg-core.sh ]; then
-                dl_ok=1
-            fi
-            if [ $dl_ok -eq 0 ]; then
+                chmod +x /opt/tg-core/tg-core.sh
+                success "tg-core.sh установлен"
+            else
                 warning "Не удалось скачать. Помести tg-core.sh вручную в /opt/tg-core/"
-                read -rp " Enter... "; return
+                read -rp " Enter... "
+                return
             fi
-            chmod +x /opt/tg-core/tg-core.sh
-            success "tg-core.sh установлен"
         else
             return
         fi
     fi
 
+    # Пытаемся загрузить ядро
     if ! _tg_core_load; then
-        warning "Не удалось загрузить tg-core.sh (возможно, повреждён)"
+        warning "Не удалось загрузить tg-core.sh. Проверь файл в /opt/tg-core/"
         read -rp " Enter... "
         return
     fi
 
+    # Загружаем конфиг ядра
     tg_load_config
     
     # Расширенное меню Telegram
@@ -637,7 +657,6 @@ manager_tg_settings() {
         esac
     done
 }
-
 # ============ ФУНКЦИИ МЕНЕДЖЕРА ============
 
 manager_show_qr() {
