@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================
-# TG Core — Telegram Notification Engine v1.1
+# TG Core — Telegram Notification Engine v1.2
 # Независимое ядро TG-уведомлений
 # github.com/tarpy-socdev/MTP-manager
 # ==============================================
@@ -11,6 +11,13 @@
 # ПЕРЕМЕННЫЕ (задаются до source):
 #   TG_PROJECT_NAME  — имя проекта (по умолчанию: "Service")
 #   TG_BUILD_MSG_FN  — колбек построения сообщения: fn(mode)
+# ==============================================
+# CHANGELOG v1.2:
+# - Улучшена обработка ошибок в tg_send (проверка "message not modified")
+# - Замена grep -P на sed для совместимости
+# - Улучшен демон с таймаутом ожидания токена
+# - Фиксированный путь установки вместо копирования через $0
+# - Замена ручной очистки на clear
 # ==============================================
 
 # ── Пути ──────────────────────────────────────
@@ -66,9 +73,8 @@ tg_save_config() {
     chmod 600 "$TG_CORE_CONFIG"
 }
 
-# ============ ОТПРАВКА ============
+# ============ ОТПРАВКА (УЛУЧШЕННАЯ) ============
 
-# FIX: уникальный файл для каждого chat_id — используем md5 от ID
 _tg_msgid_file() {
     local chat_id="$1"
     local hash
@@ -101,10 +107,18 @@ tg_send() {
                 -d "message_id=${msg_id}" \
                 -d "parse_mode=HTML" \
                 --data-urlencode "text=${text}" 2>/dev/null)
+            
+            # Проверяем успех
             if echo "$resp" | grep -q '"ok":true'; then
                 return 0
             fi
-            # Сообщение удалено или недоступно — отправим новое
+            
+            # Проверяем специфичную ошибку "message is not modified"
+            if echo "$resp" | grep -q '"description":"Bad Request: message is not modified"'; then
+                return 0  # Считаем успехом, ничего не меняем
+            fi
+            
+            # Другая ошибка - удаляем файл и отправим новое
             rm -f "$msgid_file"
         fi
     fi
@@ -118,14 +132,15 @@ tg_send() {
         --data-urlencode "text=${text}" 2>/dev/null)
 
     if echo "$resp" | grep -q '"ok":true'; then
+        # Более надежное извлечение message_id без grep -P
         local mid
-        mid=$(echo "$resp" | grep -oP '"message_id":\K\d+' | head -1)
+        mid=$(echo "$resp" | sed -n 's/.*"message_id":\([0-9]*\).*/\1/p' | head -1)
         [ -n "$mid" ] && echo "$mid" > "$msgid_file"
         return 0
     fi
 
     local err
-    err=$(echo "$resp" | grep -oP '"description":"\K[^"]+' | head -1)
+    err=$(echo "$resp" | sed -n 's/.*"description":"\([^"]*\).*/\1/p' | head -1)
     printf "[tg-core] ✗ %s: %s\n" "$chat_id" "${err:-нет ответа}" >&2
     return 1
 }
@@ -157,21 +172,26 @@ tg_build_message() {
     fi
 }
 
-# ============ ДЕМОН ============
+# ============ ДЕМОН (УЛУЧШЕННЫЙ) ============
 
 tg_daemon_loop() {
-    # Ждём конфига при старте раньше времени
-    local attempts=0
+    # Ждём конфига с токеном
+    local waited=0
     while true; do
         tg_load_config
-        [ -n "$TG_BOT_TOKEN" ] && break
-        attempts=$(( attempts + 1 ))
-        [ $attempts -ge 60 ] && break
-        sleep 5
+        if [ -n "$TG_BOT_TOKEN" ]; then
+            break
+        fi
+        waited=$((waited + 10))
+        if [ $waited -ge 300 ]; then  # 5 минут ожидания
+            echo "[tg-core] Токен не появился после 5 минут ожидания, завершаю работу" >&2
+            exit 1
+        fi
+        sleep 10
     done
 
     while true; do
-        tg_load_config  # подхватываем изменения без рестарта
+        tg_load_config
 
         if [ -n "$TG_BOT_TOKEN" ] && [ ${#TG_CHAT_IDS[@]} -gt 0 ]; then
             for i in "${!TG_CHAT_IDS[@]}"; do
@@ -187,17 +207,25 @@ tg_daemon_loop() {
     done
 }
 
-# ============ SYSTEMD СЕРВИС ============
+# ============ SYSTEMD СЕРВИС (УЛУЧШЕННЫЙ) ============
 
 tg_install_service() {
-    # FIX: сервис всегда запускает tg-core.sh --daemon, не менеджер
-    local daemon_script="$TG_CORE_SCRIPT"
+    local daemon_script="/opt/tg-core/tg-core.sh"  # Фиксированный путь
 
     # Убеждаемся что ядро скопировано в постоянное место
     if [ ! -f "$daemon_script" ]; then
         mkdir -p "$TG_CORE_DIR"
-        cp "${BASH_SOURCE[0]}" "$daemon_script" 2>/dev/null || \
-        cp "$0" "$daemon_script" 2>/dev/null || true
+        # Копируем текущий скрипт, но не через $0
+        if [ -n "${BASH_SOURCE[0]}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+            cp "${BASH_SOURCE[0]}" "$daemon_script" 2>/dev/null
+        else
+            # Fallback: пытаемся найти скрипт в PATH
+            local script_path
+            script_path=$(which tg-core.sh 2>/dev/null)
+            if [ -n "$script_path" ] && [ -f "$script_path" ]; then
+                cp "$script_path" "$daemon_script" 2>/dev/null
+            fi
+        fi
         chmod +x "$daemon_script" 2>/dev/null || true
     fi
 
@@ -233,8 +261,7 @@ tg_remove_service() {
 tg_service_status() {
     systemctl is-active --quiet tg-core-notify 2>/dev/null
 }
-
-# ============ ИНТЕРАКТИВНАЯ НАСТРОЙКА ============
+# ============ ИНТЕРАКТИВНАЯ НАСТРОЙКА (УЛУЧШЕННАЯ) ============
 
 tg_setup_interactive() {
     # tg_load_config вызывается вызывающей стороной или здесь
@@ -243,10 +270,10 @@ tg_setup_interactive() {
     while true; do
         # Перечитываем конфиг при каждом показе меню — подхватываем внешние изменения
         tg_load_config
-        printf "[2J[H"  # clear без fork
+        clear
         printf "${_C}${_B}"
         printf " ╔════════════════════════════════════════════╗\n"
-        printf " ║     TG Core — Настройка уведомлений v1.1  ║\n"
+        printf " ║     TG Core — Настройка уведомлений v1.2  ║\n"
         printf " ╚════════════════════════════════════════════╝\n"
         printf "${_N}\n"
 
@@ -342,13 +369,13 @@ _tg_setup_token() {
     resp=$(curl -s --max-time 8 "https://api.telegram.org/bot${new_token}/getMe" 2>/dev/null)
     if echo "$resp" | grep -q '"ok":true'; then
         local bot
-        bot=$(echo "$resp" | grep -oP '"username":"\K[^"]+')
+        bot=$(echo "$resp" | sed -n 's/.*"username":"\([^"]*\).*/\1/p')
         TG_BOT_TOKEN="$new_token"
         tg_save_config
         printf " ${_G}✓ Принят! @%s${_N}\n" "$bot"
     else
         local err
-        err=$(echo "$resp" | grep -oP '"description":"\K[^"]+')
+        err=$(echo "$resp" | sed -n 's/.*"description":"\([^"]*\).*/\1/p')
         printf " ${_R}✗ %s${_N}\n" "${err:-нет соединения}"
     fi
     read -rp " Enter... "
@@ -530,12 +557,17 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
         --install)
             [[ $EUID -ne 0 ]] && echo "Нужен root" && exit 1
             mkdir -p "$TG_CORE_DIR"
-            cp "$0" "$TG_CORE_SCRIPT"
+            # Копируем текущий скрипт
+            if [ -n "${BASH_SOURCE[0]}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+                cp "${BASH_SOURCE[0]}" "$TG_CORE_SCRIPT"
+            else
+                cp "$0" "$TG_CORE_SCRIPT"
+            fi
             chmod +x "$TG_CORE_SCRIPT"
             echo "✓ Установлен: $TG_CORE_SCRIPT"
             ;;
         *)
-            printf "tg-core.sh v1.1 — TG Notification Engine\n"
+            printf "tg-core.sh v1.2 — TG Notification Engine\n"
             printf "Использование: %s [опция]\n\n" "$0"
             printf "  --setup    Интерактивная настройка\n"
             printf "  --daemon   Запуск демона (systemd)\n"
