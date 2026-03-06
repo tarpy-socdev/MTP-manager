@@ -1,4 +1,4 @@
-# 🚀 MTProto Proxy — Универсальный Менеджер v4.3
+# 🚀 MTProto Proxy — Универсальный Менеджер v4.4
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Shell Script](https://img.shields.io/badge/Shell_Script-121011?logo=gnu-bash&logoColor=white)
