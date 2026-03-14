@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================
-# MTProto Proxy — Universal Manager v5.1
+# MTProto Proxy — Universal Manager 
 # Установка + Менеджер в одном скрипте
 # github.com/tarpy-socdev/MTP-manager
 # ==============================================
@@ -43,7 +43,7 @@ header() {
     clear
     echo -e "${CYAN}${BOLD}"
     echo " ╔════════════════════════════════════════════╗"
-    echo " ║  MTProto Proxy Manager v5.1                ║"
+    echo " ║  MTProto Proxy Manager                     ║"
     echo " ║  github.com/tarpy-socdev/MTP-manager       ║"
     echo " ╚════════════════════════════════════════════╝"
     echo -e "${NC}"
