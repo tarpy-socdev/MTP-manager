@@ -30,6 +30,6 @@
 ### Быстрая установка (curl)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/main/mtproto-universal-v4.sh -o mtproto-universal-v4.sh
+curl -fsSL https://raw.githubusercontent.com/tarpy-socdev/MTP-manager/refs/heads/deving/mtproto-universal-v4.sh -o mtproto-universal-v4.sh
 chmod +x mtproto-universal-v4.sh
 sudo ./mtproto-universal-v4.sh
